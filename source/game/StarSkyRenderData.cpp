@@ -60,7 +60,16 @@ SkyWorldHorizon SkyRenderData::worldHorizon(Vec2F const& viewSize) const {
     worldHorizon.center = Vec2F(viewSize[0] / 2, 0) - worldOffset;
     worldHorizon.scale = settings.queryFloat("planetHorizon.scale");
     worldHorizon.rotation = worldRotation;
-    worldHorizon.layers = skyParameters.horizonImages;
+    bool frontLayers = false;
+    for (auto const& layer : skyParameters.horizonImages) {
+      if (layer.first.empty() && layer.second.empty()) {
+        frontLayers = true;
+      } else if (frontLayers) {
+        worldHorizon.frontLayers.append(layer);
+      } else {
+        worldHorizon.layers.append(layer);
+      }
+    }
   }
 
   return worldHorizon;

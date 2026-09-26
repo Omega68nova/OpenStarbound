@@ -776,6 +776,50 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
     }
   }
 
+  String planetaryParallaxLayer;
+  if (auto layer = m_worldTemplate->weatherLayerAt(Vec2I::floor(m_clientState.windowCenter())))
+    planetaryParallaxLayer = layer->name;
+
+  StringList planetaryParallaxAssets;
+  if (!planetaryParallaxLayer.empty()) {
+    for (auto const& featureName : m_worldTemplate->planetaryFeatures()) {
+      if (auto feature = planetaryFeatureConfig(featureName)) {
+        auto layers = feature->getObject("layers", JsonObject{});
+        if (layers.contains(planetaryParallaxLayer))
+          planetaryParallaxAssets.appendAll(jsonToStringList(
+              layers.get(planetaryParallaxLayer).getArray("parallax", JsonArray{})));
+      }
+    }
+  }
+
+  if (planetaryParallaxLayer != m_planetaryParallaxLayer
+      || planetaryParallaxAssets != m_planetaryParallaxAssets
+      || environmentBiome != m_planetaryParallaxBiome) {
+    m_planetaryParallaxLayer = planetaryParallaxLayer;
+    m_planetaryParallaxAssets = planetaryParallaxAssets;
+    m_planetaryParallaxBiome = environmentBiome;
+    m_planetaryParallaxes.clear();
+
+    for (auto const& asset : planetaryParallaxAssets) {
+      ParallaxPtr overlay;
+      if (environmentBiome && environmentBiome->parallax) {
+        overlay = environmentBiome->parallax->createOverlay(asset);
+      } else {
+        float hueShift = environmentBiome ? environmentBiome->hueShift : 0.0f;
+        Maybe<TreeVariant> treeVariant;
+        if (environmentBiome)
+          treeVariant = environmentBiome->surfacePlaceables.firstTreeType();
+        overlay = make_shared<Parallax>(asset,
+            m_worldTemplate->worldSeed(), m_worldTemplate->surfaceLevel(), hueShift, std::move(treeVariant));
+      }
+      overlay->fadeToSkyColor(m_sky->mainSkyColor());
+      m_planetaryParallaxes.append(std::move(overlay));
+    }
+  }
+
+  for (auto const& parallax : m_planetaryParallaxes)
+    renderData.parallaxLayers.appendAll(parallax->layers());
+
   auto weatherParallaxAsset = currentWeatherDomain() == m_weatherDomain ? m_weather.weatherParallax() : Maybe<String>();
   if (weatherParallaxAsset != m_weatherParallaxAsset || environmentBiome != m_weatherParallaxBiome) {
     m_weatherParallaxAsset = weatherParallaxAsset;
@@ -2155,6 +2199,10 @@ void WorldClient::clearWorld() {
   m_weatherParallaxAsset.reset();
   m_weatherParallaxBiome.reset();
   m_weatherParallax.reset();
+  m_planetaryParallaxLayer.clear();
+  m_planetaryParallaxAssets.clear();
+  m_planetaryParallaxBiome.reset();
+  m_planetaryParallaxes.clear();
   m_weatherDomain.reset();
   m_lastParallaxWindEpoch.reset();
   m_parallaxWindDirectionTime = 0.0;

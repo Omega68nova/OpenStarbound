@@ -347,6 +347,10 @@ private:
   Maybe<String> m_weatherParallaxAsset;
   BiomeConstPtr m_weatherParallaxBiome;
   ParallaxPtr m_weatherParallax;
+  String m_planetaryParallaxLayer;
+  StringList m_planetaryParallaxAssets;
+  BiomeConstPtr m_planetaryParallaxBiome;
+  List<ParallaxPtr> m_planetaryParallaxes;
   Maybe<String> m_weatherDomain;
   Maybe<double> m_lastParallaxWindEpoch;
   double m_parallaxWindDirectionTime = 0.0;

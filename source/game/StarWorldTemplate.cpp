@@ -40,6 +40,7 @@ WorldTemplate::WorldTemplate(CelestialCoordinate const& celestialCoordinate, Cel
     m_layout = make_shared<WorldLayout>(WorldLayout::buildFloatingDungeonLayout(*floatingDungeonParameters, m_seed));
 
   determineWorldName();
+  setupTerrestrialLayers();
   setupWeatherDomains();
 }
 
@@ -61,6 +62,7 @@ WorldTemplate::WorldTemplate(VisitableWorldParametersConstPtr const& worldParame
     m_layout = make_shared<WorldLayout>(WorldLayout::buildFloatingDungeonLayout(*floatingDungeonParameters, m_seed));
 
   determineWorldName();
+  setupTerrestrialLayers();
   setupWeatherDomains();
 }
 
@@ -81,6 +83,7 @@ WorldTemplate::WorldTemplate(Json const& store) : WorldTemplate() {
     });
 
   determineWorldName();
+  setupTerrestrialLayers();
   setupWeatherDomains();
 }
 
@@ -102,6 +105,12 @@ Maybe<CelestialParameters> const& WorldTemplate::celestialParameters() const {
   return m_celestialParameters;
 }
 
+StringList WorldTemplate::planetaryFeatures() const {
+  if (m_celestialParameters)
+    return jsonToStringList(m_celestialParameters->getParameter("planetaryFeatures", JsonArray{}));
+  return {};
+}
+
 VisitableWorldParametersConstPtr WorldTemplate::worldParameters() const {
   return m_worldParameters;
 }
@@ -116,6 +125,7 @@ WorldLayoutPtr WorldTemplate::worldLayout() const {
 
 void WorldTemplate::setWorldParameters(VisitableWorldParametersPtr newParameters) {
   m_worldParameters = take(newParameters);
+  setupTerrestrialLayers();
   setupWeatherDomains();
 }
 
@@ -436,6 +446,18 @@ WorldTemplate::WeatherLayer const* WorldTemplate::weatherLayerAt(Vec2I const& po
   return nullptr;
 }
 
+List<WorldTemplate::TerrestrialLayerInfo> const& WorldTemplate::terrestrialLayers() const {
+  return m_terrestrialLayers;
+}
+
+WorldTemplate::TerrestrialLayerInfo const* WorldTemplate::terrestrialLayerAt(Vec2I const& position) const {
+  for (auto const& layer : m_terrestrialLayers) {
+    if (position[1] >= layer.minHeight && position[1] < layer.maxHeight)
+      return &layer;
+  }
+  return nullptr;
+}
+
 AmbientNoisesDescriptionPtr WorldTemplate::ambientNoises(int x, int y) const {
   if (auto floatingDungeonParameters = as<FloatingDungeonWorldParameters>(m_worldParameters)) {
     if (floatingDungeonParameters->dayAmbientNoises || floatingDungeonParameters->nightAmbientNoises) {
@@ -470,9 +492,49 @@ AmbientNoisesDescriptionPtr WorldTemplate::musicTrack(int x, int y) const {
   return {};
 }
 
-StringList WorldTemplate::environmentStatusEffects(int, int) const {
-  if (m_worldParameters)
+StringList WorldTemplate::environmentStatusEffects(int x, int y) const {
+  if (m_worldParameters) {
+    if (auto terrestrial = as<TerrestrialWorldParameters>(m_worldParameters)) {
+      auto biomeDatabase = Root::singleton().biomeDatabase();
+      auto globalEffects = [&] {
+        return biomeDatabase->biomeStatusEffects(terrestrial->primaryBiome);
+      };
+
+      if (auto layer = terrestrialLayerAt({x, y})) {
+        auto policy = m_environmentStatusEffectPolicies.value(layer->name);
+        if (policy.mode == EnvironmentStatusEffectsMode::Global)
+          return globalEffects();
+
+        String primaryBiome = layer->parameters->primaryRegion.biome;
+        // Terraforming changes the effective primary surface biome without
+        // rebuilding the baked terrestrial layer parameters.
+        if (layer->name == "surface" && terrestrial->terraformed)
+          primaryBiome = terrestrial->primaryBiome;
+
+        auto primaryEffects = biomeDatabase->biomeStatusEffects(primaryBiome);
+        if (policy.mode == EnvironmentStatusEffectsMode::Layer)
+          return primaryEffects;
+
+        StringList regionEffects;
+        if (auto regionBiome = environmentBiome(x, y))
+          regionEffects = biomeDatabase->biomeStatusEffects(regionBiome->baseName);
+        else
+          regionEffects = primaryEffects;
+
+        if (!policy.keepPrimaryRegionStatusEffectsAlways)
+          return regionEffects;
+
+        for (auto const& effect : regionEffects) {
+          if (!primaryEffects.contains(effect))
+            primaryEffects.append(effect);
+        }
+        return primaryEffects;
+      }
+
+      return globalEffects();
+    }
     return m_worldParameters->environmentStatusEffects;
+  }
   return {};
 }
 
@@ -616,6 +678,61 @@ void WorldTemplate::determineWorldName() {
     m_worldName = "";
 }
 
+void WorldTemplate::setupTerrestrialLayers() {
+  m_terrestrialLayers.clear();
+  m_environmentStatusEffectPolicies.clear();
+
+  if (!m_worldParameters)
+    return;
+
+  if (auto terrestrial = as<TerrestrialWorldParameters>(m_worldParameters)) {
+    struct LayerDefinition {
+      String name;
+      TerrestrialWorldParameters::TerrestrialLayer const* parameters;
+    };
+
+    List<LayerDefinition> definitions;
+    definitions.append({"core", &terrestrial->coreLayer});
+    for (size_t i = terrestrial->undergroundLayers.size(); i != 0; --i)
+      definitions.append({strf("underground{}", i), &terrestrial->undergroundLayers[i - 1]});
+    definitions.append({"subsurface", &terrestrial->subsurfaceLayer});
+    definitions.append({"surface", &terrestrial->surfaceLayer});
+    definitions.append({"atmosphere", &terrestrial->atmosphereLayer});
+    definitions.append({"space", &terrestrial->spaceLayer});
+
+    for (size_t i = 0; i < definitions.size(); ++i) {
+      int minHeight = definitions[i].parameters->layerMinHeight;
+      int maxHeight = i + 1 < definitions.size()
+          ? definitions[i + 1].parameters->layerMinHeight
+          : (int)m_geometry.height();
+      m_terrestrialLayers.append({definitions[i].name, definitions[i].parameters, minHeight, maxHeight});
+    }
+
+    if (m_celestialParameters) {
+      auto policies = m_celestialParameters->getParameter("environmentStatusEffectPolicies", JsonObject{});
+      for (auto const& layer : m_terrestrialLayers) {
+        if (!policies.contains(layer.name))
+          continue;
+
+        auto config = policies.get(layer.name);
+        auto modeName = config.getString("mode", "global");
+        EnvironmentStatusEffectsMode mode;
+        if (modeName == "global")
+          mode = EnvironmentStatusEffectsMode::Global;
+        else if (modeName == "layer")
+          mode = EnvironmentStatusEffectsMode::Layer;
+        else if (modeName == "region")
+          mode = EnvironmentStatusEffectsMode::Region;
+        else
+          throw StarException(strf("Unknown environment status effects mode '{}' for layer '{}'", modeName, layer.name));
+
+        m_environmentStatusEffectPolicies[layer.name] = EnvironmentStatusEffectPolicy{
+            mode, config.getBool("keepPrimaryRegionStatusEffectsAlways", false)};
+      }
+    }
+  }
+}
+
 void WorldTemplate::setupWeatherDomains() {
   m_weatherDomains.clear();
   m_weatherLayers.clear();
@@ -624,44 +741,49 @@ void WorldTemplate::setupWeatherDomains() {
     return;
 
   if (auto terrestrial = as<TerrestrialWorldParameters>(m_worldParameters)) {
-    struct LayerDefinition {
-      String name;
-      TerrestrialWorldParameters::TerrestrialLayer const* layer;
-      bool inheritsSurface;
-    };
-
-    List<LayerDefinition> definitions;
-    definitions.append({"core", &terrestrial->coreLayer, false});
-    for (size_t i = terrestrial->undergroundLayers.size(); i != 0; --i)
-      definitions.append({strf("underground{}", i), &terrestrial->undergroundLayers[i - 1], false});
-    definitions.append({"subsurface", &terrestrial->subsurfaceLayer, true});
-    definitions.append({"surface", &terrestrial->surfaceLayer, false});
-    definitions.append({"atmosphere", &terrestrial->atmosphereLayer, true});
-    definitions.append({"space", &terrestrial->spaceLayer, false});
-
-    m_weatherDomains.append({"surface", terrestrial->weatherPool, terrestrial->surfaceLayer.layerMinHeight});
+    StringList features;
+    for (auto const& featureName : planetaryFeatures()) {
+      if (planetaryFeatureConfig(featureName))
+        features.append(featureName);
+      else
+        Logger::warn("Planetary feature '{}' is no longer defined; ignoring its runtime effects", featureName);
+    }
+    WeatherPool surfacePool = terrestrial->weatherPool;
+    for (auto const& entry : planetaryFeatureWeatherPool(features, "surface").items())
+      surfacePool.add(entry.first, entry.second);
+    m_weatherDomains.append({"surface", take(surfacePool), terrestrial->surfaceLayer.layerMinHeight});
 
     auto biomeDatabase = Root::singleton().biomeDatabase();
-    for (size_t i = 0; i < definitions.size(); ++i) {
-      auto const& definition = definitions[i];
-      int minHeight = definition.layer->layerMinHeight;
-      int maxHeight = i + 1 < definitions.size()
-          ? definitions[i + 1].layer->layerMinHeight
-          : (int)m_geometry.height();
+    for (auto const& layer : m_terrestrialLayers) {
+      bool inheritsSurface = layer.name == "subsurface" || layer.name == "atmosphere";
 
       Maybe<String> domain;
-      if (definition.name == "surface") {
+      if (layer.name == "surface") {
         domain = String("surface");
-      } else if (biomeDatabase->biomeHasWeather(definition.layer->primaryRegion.biome)) {
-        domain = definition.name;
-        auto pool = biomeDatabase->biomeWeathers(definition.layer->primaryRegion.biome, m_seed, threatLevel());
-        m_weatherDomains.append({definition.name, take(pool), minHeight});
-      } else if (definition.inheritsSurface) {
-        domain = String("surface");
-        m_weatherDomains[0].effectsMinHeight = std::min(m_weatherDomains[0].effectsMinHeight, minHeight);
+      } else {
+        auto featurePool = planetaryFeatureWeatherPool(features, layer.name);
+        bool hasFeatureWeather = !featurePool.empty();
+        bool hasBiomeWeather = biomeDatabase->biomeHasWeather(layer.parameters->primaryRegion.biome);
+
+        if (hasBiomeWeather || hasFeatureWeather) {
+          domain = layer.name;
+          WeatherPool pool;
+          if (hasBiomeWeather) {
+            pool = biomeDatabase->biomeWeathers(layer.parameters->primaryRegion.biome, m_seed, threatLevel());
+          } else if (inheritsSurface) {
+            for (auto const& entry : m_weatherDomains[0].pool.items())
+              pool.add(entry.first, entry.second);
+          }
+          for (auto const& entry : featurePool.items())
+            pool.add(entry.first, entry.second);
+          m_weatherDomains.append({layer.name, take(pool), layer.minHeight});
+        } else if (inheritsSurface) {
+          domain = String("surface");
+          m_weatherDomains[0].effectsMinHeight = std::min(m_weatherDomains[0].effectsMinHeight, layer.minHeight);
+        }
       }
 
-      m_weatherLayers.append({definition.name, take(domain), minHeight, maxHeight});
+      m_weatherLayers.append({layer.name, take(domain), layer.minHeight, layer.maxHeight});
     }
   } else {
     m_weatherDomains.append({"surface", m_worldParameters->weatherPool, (int)undergroundLevel()});

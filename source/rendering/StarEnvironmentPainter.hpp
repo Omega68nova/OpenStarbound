@@ -21,7 +21,7 @@ public:
   void renderStars(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky);
   void renderDebrisFields(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky);
   void renderBackOrbiters(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky);
-  void renderPlanetHorizon(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky);
+  void renderPlanetHorizon(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky, bool front = false);
   void renderFrontOrbiters(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky);
   void renderSky(Vec2F const& screenSize, SkyRenderData const& sky);
 

@@ -1,0 +1,9 @@
+{
+  "planetDefaults" : {
+    "planetaryFeatures" : {},
+    "environmentStatusEffectsMode" : "global",
+    "keepPrimaryRegionStatusEffectsAlways" : false
+  },
+  "planetaryFeatures" : {},
+  "planetaryFeatureGroups" : {}
+}

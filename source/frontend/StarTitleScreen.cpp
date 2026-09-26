@@ -75,6 +75,7 @@ void TitleScreen::render() {
   m_environmentPainter->renderPlanetHorizon(orbiterAndPlanetRatio, screenSize, skyRenderData);
   m_environmentPainter->renderSky(screenSize, skyRenderData);
   m_environmentPainter->renderFrontOrbiters(orbiterAndPlanetRatio, screenSize, skyRenderData);
+  m_environmentPainter->renderPlanetHorizon(orbiterAndPlanetRatio, screenSize, skyRenderData, true);
 
   m_renderer->flush();
 

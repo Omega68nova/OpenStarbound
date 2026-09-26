@@ -108,7 +108,7 @@ SkyWorldHorizon::SkyWorldHorizon(Vec2F center, float scale, float rotation)
   : center(center), scale(scale), rotation(rotation) {}
 
 bool SkyWorldHorizon::empty() const {
-  return scale <= 0 || layers.empty();
+  return scale <= 0 || (layers.empty() && frontLayers.empty());
 }
 
 }
