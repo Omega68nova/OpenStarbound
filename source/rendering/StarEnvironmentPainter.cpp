@@ -160,15 +160,20 @@ void EnvironmentPainter::renderBackOrbiters(float pixelRatio, Vec2F const& scree
   m_renderer->flush();
 }
 
-void EnvironmentPainter::renderPlanetHorizon(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky) {
+void EnvironmentPainter::renderPlanetHorizon(float pixelRatio, Vec2F const& screenSize, SkyRenderData const& sky, bool front) {
   auto planetHorizon = sky.worldHorizon(screenSize / pixelRatio);
   if (planetHorizon.empty())
     return;
 
+  auto const& horizonLayers = front ? planetHorizon.frontLayers : planetHorizon.layers;
+  if (horizonLayers.empty())
+    return;
+
   // Can't bail sooner, need to queue all textures
   bool allLoaded = true;
-  for (auto const& layer : planetHorizon.layers) {
-    if (!m_textureGroup->tryTexture(layer.first) || !m_textureGroup->tryTexture(layer.second))
+  for (auto const& layer : horizonLayers) {
+    if ((!layer.first.empty() && !m_textureGroup->tryTexture(layer.first))
+        || (!layer.second.empty() && !m_textureGroup->tryTexture(layer.second)))
       allLoaded = false;
   }
 
@@ -180,33 +185,36 @@ void EnvironmentPainter::renderPlanetHorizon(float pixelRatio, Vec2F const& scre
 
   auto& primitives = m_renderer->immediatePrimitives();
 
-  for (auto const& layer : planetHorizon.layers) {
-    TexturePtr leftTexture = m_textureGroup->loadTexture(layer.first);
-    Vec2F leftTextureSize(leftTexture->size());
-    TexturePtr rightTexture = m_textureGroup->loadTexture(layer.second);
-    Vec2F rightTextureSize(rightTexture->size());
+  for (auto const& layer : horizonLayers) {
+    if (!layer.first.empty()) {
+      TexturePtr leftTexture = m_textureGroup->loadTexture(layer.first);
+      Vec2F leftTextureSize(leftTexture->size());
+      Vec2F leftLayer = center;
+      leftLayer[0] -= leftTextureSize[0] * planetPixelRatio;
+      auto leftRect = RectF::withSize(leftLayer, leftTextureSize * planetPixelRatio);
+      PolyF leftImage = PolyF(leftRect);
+      leftImage.rotate(planetHorizon.rotation, center);
 
-    Vec2F leftLayer = center;
-    leftLayer[0] -= leftTextureSize[0] * planetPixelRatio;
-    auto leftRect = RectF::withSize(leftLayer, leftTextureSize * planetPixelRatio);
-    PolyF leftImage = PolyF(leftRect);
-    leftImage.rotate(planetHorizon.rotation, center);
+      primitives.emplace_back(std::in_place_type_t<RenderQuad>(), std::move(leftTexture),
+          leftImage[0], Vec2F(0, 0),
+          leftImage[1], Vec2F(leftTextureSize[0], 0),
+          leftImage[2], Vec2F(leftTextureSize[0], leftTextureSize[1]),
+          leftImage[3], Vec2F(0, leftTextureSize[1]), Vec4B::filled(255), 0.0f);
+    }
 
-    auto rightRect = RectF::withSize(center, rightTextureSize * planetPixelRatio);
-    PolyF rightImage = PolyF(rightRect);
-    rightImage.rotate(planetHorizon.rotation, center);
+    if (!layer.second.empty()) {
+      TexturePtr rightTexture = m_textureGroup->loadTexture(layer.second);
+      Vec2F rightTextureSize(rightTexture->size());
+      auto rightRect = RectF::withSize(center, rightTextureSize * planetPixelRatio);
+      PolyF rightImage = PolyF(rightRect);
+      rightImage.rotate(planetHorizon.rotation, center);
 
-    primitives.emplace_back(std::in_place_type_t<RenderQuad>(), std::move(leftTexture),
-        leftImage[0], Vec2F(0, 0),
-        leftImage[1], Vec2F(leftTextureSize[0], 0),
-        leftImage[2], Vec2F(leftTextureSize[0], leftTextureSize[1]),
-        leftImage[3], Vec2F(0, leftTextureSize[1]), Vec4B::filled(255), 0.0f);
-
-    primitives.emplace_back(std::in_place_type_t<RenderQuad>(), std::move(rightTexture),
-        rightImage[0], Vec2F(0, 0),
-        rightImage[1], Vec2F(rightTextureSize[0], 0),
-        rightImage[2], Vec2F(rightTextureSize[0], rightTextureSize[1]),
-        rightImage[3], Vec2F(0, rightTextureSize[1]), Vec4B::filled(255), 0.0f);
+      primitives.emplace_back(std::in_place_type_t<RenderQuad>(), std::move(rightTexture),
+          rightImage[0], Vec2F(0, 0),
+          rightImage[1], Vec2F(rightTextureSize[0], 0),
+          rightImage[2], Vec2F(rightTextureSize[0], rightTextureSize[1]),
+          rightImage[3], Vec2F(0, rightTextureSize[1]), Vec4B::filled(255), 0.0f);
+    }
   }
 
   m_renderer->flush();

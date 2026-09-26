@@ -182,7 +182,40 @@ VisitableWorldParametersPtr diskLoadVisitableWorldParameters(Json const& store);
 ByteArray netStoreVisitableWorldParameters(VisitableWorldParametersConstPtr const& parameters);
 VisitableWorldParametersPtr netLoadVisitableWorldParameters(ByteArray data);
 
-TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& typeName, String const& sizeName, uint64_t seed);
+// Recursively selects persistent planetary features from the independently
+// rolled typed feature and group references configured for a newly generated
+// terrestrial celestial body.
+StringList selectPlanetaryFeatures(String const& typeName, String const& sizeName, uint64_t seed);
+StringList selectPlanetaryFeaturesFromConfig(Json const& selectionConfig, Json const& featureDefinitions,
+    uint64_t seed, Json const& featureGroups = JsonObject{});
+
+// Resolves environmental status-effect behavior for every terrestrial layer.
+// Each returned object contains a mode (global, layer, or region) and the
+// keepPrimaryRegionStatusEffectsAlways flag. More local modes contributed by
+// selected features win, while keep-primary flags combine with boolean OR.
+Json environmentStatusEffectPolicies(String const& typeName, String const& sizeName,
+    StringList const& planetaryFeatures = {});
+Json environmentStatusEffectPoliciesFromConfig(Json const& planetConfig,
+    Json const& featureDefinitions, StringList const& planetaryFeatures = {});
+
+// Returns a planetary feature definition from terrestrial_worlds.config, or
+// nothing when the definition is no longer present.
+Maybe<Json> planetaryFeatureConfig(String const& featureName);
+
+// Combines every weather pool asset added to a layer by the selected features.
+WeatherPool planetaryFeatureWeatherPool(StringList const& planetaryFeatures, String const& layerName);
+
+// Selects the dungeons contributed independently by one planetary feature layer.
+StringList selectPlanetaryFeatureDungeons(Json const& layerConfig, uint64_t seed, String const& featureName, String const& layerName);
+
+// Applies one planetary feature's dungeon configuration to a generated layer.
+// replaceDungeons clears all earlier dungeon selections before adding this
+// feature's selections, including when the feature selects no dungeons.
+void applyPlanetaryFeatureDungeons(StringList& dungeons, Json const& layerConfig,
+    uint64_t seed, String const& featureName, String const& layerName);
+
+TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(
+    String const& typeName, String const& sizeName, uint64_t seed, StringList const& planetaryFeatures = {});
 AsteroidsWorldParametersPtr generateAsteroidsWorldParameters(uint64_t seed);
 FloatingDungeonWorldParametersPtr generateFloatingDungeonWorldParameters(String const& dungeonWorldName);
 

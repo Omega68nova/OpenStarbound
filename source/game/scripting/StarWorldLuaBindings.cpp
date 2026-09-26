@@ -309,6 +309,14 @@ namespace LuaBindings {
         return false;
       });
 
+    callbacks.registerCallback("planetaryFeatures", [world]() -> StringList {
+        if (auto serverWorld = as<WorldServer>(world))
+          return serverWorld->worldTemplate()->planetaryFeatures();
+        if (auto clientWorld = as<WorldClient>(world))
+          return clientWorld->currentTemplate()->planetaryFeatures();
+        return {};
+      });
+
     callbacks.registerCallback("biomeBlocksAt", [world](Vec2I position) -> Maybe<List<MaterialId>> {
         WorldTemplateConstPtr worldTemplate;
         if (auto worldClient = as<WorldClient>(world))

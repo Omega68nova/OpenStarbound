@@ -17,7 +17,11 @@ CelestialParameters::CelestialParameters(CelestialCoordinate coordinate, uint64_
     if (worldType->equalsIgnoreCase("Terrestrial")) {
       auto worldSize = getParameter("worldSize").toString();
       auto type = randomizeParameterList("terrestrialType").toString();
-      m_visitableParameters = generateTerrestrialWorldParameters(type, worldSize, m_seed);
+      auto planetaryFeatures = selectPlanetaryFeatures(type, worldSize, m_seed);
+      m_parameters = m_parameters.set("planetaryFeatures", jsonFromStringList(planetaryFeatures));
+      m_parameters = m_parameters.set("environmentStatusEffectPolicies",
+          environmentStatusEffectPolicies(type, worldSize, planetaryFeatures));
+      m_visitableParameters = generateTerrestrialWorldParameters(type, worldSize, m_seed, planetaryFeatures);
     } else if (worldType->equalsIgnoreCase("Asteroids")) {
       m_visitableParameters = generateAsteroidsWorldParameters(m_seed);
     } else if (worldType->equalsIgnoreCase("FloatingDungeon")) {

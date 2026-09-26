@@ -1,4 +1,5 @@
 #include "StarCelestialGraphics.hpp"
+#include "StarAlgorithm.hpp"
 #include "StarJsonExtra.hpp"
 #include "StarLexicalCast.hpp"
 #include "StarFormat.hpp"
@@ -12,6 +13,17 @@
 #include "StarAssets.hpp"
 
 namespace Star {
+
+namespace {
+  List<Json> planetaryFeatureGraphics(CelestialParameters const& parameters) {
+    List<Json> graphics;
+    for (auto const& featureName : jsonToStringList(parameters.getParameter("planetaryFeatures", JsonArray{}))) {
+      if (auto feature = planetaryFeatureConfig(featureName))
+        graphics.append(feature->get("graphics", JsonObject{}));
+    }
+    return graphics;
+  }
+}
 
 List<pair<String, float>> CelestialGraphics::drawSystemPlanetaryObject(CelestialParameters const& parameters) {
   return {{parameters.getParameter("smallImage").toString(), parameters.getParameter("smallImageScale").toFloat()}};
@@ -38,45 +50,102 @@ List<pair<String, float>> CelestialGraphics::drawWorld(
     if (!terrestrialParameters)
       return {};
 
-    auto gfxConfig = jsonMerge(assets->json("/celestial.config:terrestrialGraphics").get("default"),
-        assets->json("/celestial.config:terrestrialGraphics").get(terrestrialParameters->typeName, JsonObject()));
-
-    auto liquidImages = gfxConfig.getString("liquidImages", "");
-    auto baseImages = gfxConfig.getString("baseImages", "");
-    auto shadowImages = gfxConfig.getString("shadowImages", "");
-    auto baseCount = gfxConfig.getInt("baseCount", 0);
-    auto dynamicsImages = gfxConfig.getString("dynamicsImages", "");
+    auto terrestrialGraphics = assets->json("/celestial.config:terrestrialGraphics");
+    auto gfxConfig = jsonMerge(terrestrialGraphics.get("default"),
+        terrestrialGraphics.get(terrestrialParameters->typeName, JsonObject()));
+    auto featureGraphics = planetaryFeatureGraphics(celestialParameters);
     float imageScale = celestialParameters.getParameter("imageScale", 1.0f).toFloat();
 
-    // If the planet has water, then draw the corresponding water image as the
-    // base layer, otherwise use the bottom most mask image.
-    if (terrestrialParameters->primarySurfaceLiquid != EmptyLiquidId && !liquidImages.empty()) {
-      String liquidBaseImage = liquidImages.replace("<liquid>", liquidsDatabase->liquidName(terrestrialParameters->primarySurfaceLiquid));
-      layers.append({std::move(liquidBaseImage), imageScale});
-    } else {
-      if (baseCount > 0) {
-        String baseLayer = strf("{}?hueshift={}", baseImages.replace("<biome>",
-            terrestrialParameters->primaryBiome).replace("<num>", toString(baseCount)), terrestrialParameters->hueShift);
-        layers.append({std::move(baseLayer), imageScale});
+    List<pair<int, pair<String, float>>> orderedLayers;
+    auto appendWorldLayer = [&](int zLevel, String image) {
+      orderedLayers.append({zLevel, {std::move(image), imageScale}});
+    };
+
+    auto appendGraphicsBody = [&](Json const& graphicsConfig, int zLevel) {
+      auto liquidImages = graphicsConfig.getString("liquidImages", "");
+      auto baseImages = graphicsConfig.getString("baseImages", "");
+      auto baseCount = graphicsConfig.getInt("baseCount", 0);
+      auto dynamicsImages = graphicsConfig.getString("dynamicsImages", "");
+
+      // If the planet has water, then draw the corresponding water image as the
+      // base layer, otherwise use the bottom most mask image.
+      if (graphicsConfig.getBool("baseLayer", true)) {
+        if (terrestrialParameters->primarySurfaceLiquid != EmptyLiquidId && !liquidImages.empty()) {
+          String liquidBaseImage = liquidImages.replace("<liquid>", liquidsDatabase->liquidName(terrestrialParameters->primarySurfaceLiquid));
+          appendWorldLayer(zLevel, std::move(liquidBaseImage));
+        } else if (baseCount > 0) {
+          String baseLayer = strf("{}?hueshift={}", baseImages.replace("<biome>",
+              terrestrialParameters->primaryBiome).replace("<num>", toString(baseCount)), terrestrialParameters->hueShift);
+          appendWorldLayer(zLevel, std::move(baseLayer));
+        }
       }
+
+      // Then draw all the biome layers.
+      for (int i = 0; i < baseCount; ++i) {
+        String baseImage = baseImages.replace("<num>", toString(baseCount - i));
+        String hueShiftString, dynamicMaskString;
+        if (!dynamicsImages.empty())
+          dynamicMaskString = "?addmask=" + dynamicsImages.replace("<num>", toString(celestialParameters.randomizeParameterRange(graphicsConfig.getArray("dynamicsRange"), i).toInt()));
+        if (terrestrialParameters->hueShift != 0)
+          hueShiftString = strf("?hueshift={}", terrestrialParameters->hueShift);
+        String layer = baseImage + hueShiftString + dynamicMaskString;
+        appendWorldLayer(zLevel, std::move(layer));
+      }
+    };
+
+    auto appendGraphicsShadow = [&](Json const& graphicsConfig, int zLevel) {
+      auto shadowImages = graphicsConfig.getString("shadowImages", "");
+      if (!shadowImages.empty()) {
+        String shadow = shadowImages.replace("<num>", toString(shadowParameters.randomizeParameterRange(graphicsConfig.getArray("shadowNumber")).toInt()));
+        appendWorldLayer(zLevel, std::move(shadow));
+      }
+    };
+
+    // Canonical planet stages leave room for features behind the planet, over
+    // its body but under atmospheric effects, and over the complete planet.
+    appendGraphicsBody(gfxConfig, 100);
+    appendGraphicsShadow(gfxConfig, 300);
+
+    for (auto const& graphics : featureGraphics) {
+      for (auto const& image : graphics.getArray("worldBack", JsonArray{}))
+        appendWorldLayer(0, image.toString());
+
+      auto legacyGraphicsName = graphics.optString("terrestrialGraphicsOverlay");
+      if (!legacyGraphicsName)
+        legacyGraphicsName = graphics.optString("terrestrialGraphics");
+      if (legacyGraphicsName) {
+        auto featureConfig = jsonMerge(terrestrialGraphics.get("default"), terrestrialGraphics.get(*legacyGraphicsName));
+        appendGraphicsBody(featureConfig, 400);
+        appendGraphicsShadow(featureConfig, 400);
+      }
+
+      for (auto const& layer : graphics.getArray("worldLayers", JsonArray{})) {
+        int zLevel = layer.getInt("zLevel", 200);
+        for (auto const& image : layer.getArray("images", JsonArray{}))
+          appendWorldLayer(zLevel, image.toString());
+
+        if (auto graphicsName = layer.optString("terrestrialGraphics")) {
+          auto featureConfig = jsonMerge(terrestrialGraphics.get("default"), terrestrialGraphics.get(*graphicsName));
+          // Layer fields may refine a named graphics entry, allowing one image
+          // set to be reused with different masks or composition semantics.
+          featureConfig = jsonMerge(featureConfig, layer);
+          auto parts = jsonToStringList(layer.get("parts", JsonArray{"body", "effects"}));
+          if (parts.contains("body"))
+            appendGraphicsBody(featureConfig, zLevel);
+          if (parts.contains("effects"))
+            appendGraphicsShadow(featureConfig, zLevel);
+        }
+      }
+
+      for (auto const& image : graphics.getArray("worldFront", JsonArray{}))
+        appendWorldLayer(400, image.toString());
     }
 
-    // Then draw all the biome layers
-    for (int i = 0; i < baseCount; ++i) {
-      String baseImage = baseImages.replace("<num>", toString(baseCount - i));
-      String hueShiftString, dynamicMaskString;
-      if (!dynamicsImages.empty())
-        dynamicMaskString = "?addmask=" + dynamicsImages.replace("<num>", toString(celestialParameters.randomizeParameterRange(gfxConfig.getArray("dynamicsRange"), i).toInt()));
-      if (terrestrialParameters->hueShift != 0)
-        hueShiftString = strf("?hueshift={}", terrestrialParameters->hueShift);
-      String layer = baseImage + hueShiftString + dynamicMaskString;
-      layers.append({std::move(layer), imageScale});
-    }
-
-    if (!shadowImages.empty()) {
-      String shadow = shadowImages.replace("<num>", toString(shadowParameters.randomizeParameterRange(gfxConfig.getArray("shadowNumber")).toInt()));
-      layers.append({std::move(shadow), imageScale});
-    }
+    stableSort(orderedLayers, [](auto const& left, auto const& right) {
+      return left.first < right.first;
+    });
+    for (auto& layer : orderedLayers)
+      layers.append(std::move(layer.second));
 
   } else if (type == "Asteroids") {
     String maskImages = celestialParameters.getParameter("maskImages").toString();
@@ -152,56 +221,118 @@ List<pair<String, String>> CelestialGraphics::worldHorizonImages(CelestialParame
     if (!terrestrialParameters)
       return {};
 
-    auto gfxConfig = jsonMerge(assets->json("/celestial.config:terrestrialHorizonGraphics").get("default"),
-        assets->json("/celestial.config:terrestrialHorizonGraphics").get(terrestrialParameters->typeName, JsonObject()));
-
-    String baseImages = gfxConfig.getString("baseImages");
-    String atmoTextures = gfxConfig.getString("atmosphereTextures");
-    String shadowTextures = gfxConfig.getString("shadowTextures");
-    String maskTextures = gfxConfig.getString("maskTextures");
-    String liquidTextures = gfxConfig.getString("liquidTextures");
-    auto numMasks = jsonToVec2I(gfxConfig.get("maskRange"));
-    auto maskPerPlanetRange = jsonToVec2I(gfxConfig.get("maskPerPlanetRange"));
+    auto terrestrialHorizonGraphics = assets->json("/celestial.config:terrestrialHorizonGraphics");
+    auto gfxConfig = jsonMerge(terrestrialHorizonGraphics.get("default"),
+        terrestrialHorizonGraphics.get(terrestrialParameters->typeName, JsonObject()));
+    auto featureGraphics = planetaryFeatureGraphics(celestialParameters);
 
     auto biomeHueShift = "?" + imageOperationToString(HueShiftImageOperation::hueShiftDegrees(terrestrialParameters->hueShift));
 
-    if (terrestrialParameters->primarySurfaceLiquid != EmptyLiquidId) {
-      auto seed = celestialParameters.seed();
-      RandomSource rand(seed);
+    List<pair<int, pair<String, String>>> orderedLayers;
+    auto appendHorizonLayer = [&](int zLevel, pair<String, String> images) {
+      orderedLayers.append({zLevel, std::move(images)});
+    };
 
-      int numPlanetMasks = rand.randInt(maskPerPlanetRange[0], maskPerPlanetRange[1]);
-      List<int> masks;
-      for (int i = 0; i < numPlanetMasks; ++i)
-        masks.append(rand.randInt(numMasks[0], numMasks[1]));
+    auto appendHorizonBody = [&](Json const& graphicsConfig, int zLevel) {
+      String baseImages = graphicsConfig.getString("baseImages");
+      String maskTextures = graphicsConfig.getString("maskTextures");
+      String liquidTextures = graphicsConfig.getString("liquidTextures");
+      auto numMasks = jsonToVec2I(graphicsConfig.get("maskRange"));
+      auto maskPerPlanetRange = jsonToVec2I(graphicsConfig.get("maskPerPlanetRange"));
 
-      String liquidBase = liquidTextures.replace("<liquid>", liquidsDatabase->liquidName(terrestrialParameters->primarySurfaceLiquid));
-      res.append(getLR(liquidBase));
+      if (terrestrialParameters->primarySurfaceLiquid != EmptyLiquidId) {
+        RandomSource rand(celestialParameters.seed());
 
-      StringList planetMaskListL;
-      StringList planetMaskListR;
-      for (auto m : masks) {
-        String base = maskTextures.replace("<mask>", toString(m));
-        auto lr = getLR(base);
-        planetMaskListL.append(lr.first);
-        planetMaskListR.append(lr.second);
+        int numPlanetMasks = rand.randInt(maskPerPlanetRange[0], maskPerPlanetRange[1]);
+        List<int> masks;
+        for (int i = 0; i < numPlanetMasks; ++i)
+          masks.append(rand.randInt(numMasks[0], numMasks[1]));
+
+        String liquidBase = liquidTextures.replace("<liquid>", liquidsDatabase->liquidName(terrestrialParameters->primarySurfaceLiquid));
+        appendHorizonLayer(zLevel, getLR(liquidBase));
+
+        StringList planetMaskListL;
+        StringList planetMaskListR;
+        for (auto m : masks) {
+          String base = maskTextures.replace("<mask>", toString(m));
+          auto lr = getLR(base);
+          planetMaskListL.append(lr.first);
+          planetMaskListR.append(lr.second);
+        }
+
+        String leftMask, rightMask;
+        if (!planetMaskListL.empty())
+          leftMask = "?" + imageOperationToString(AlphaMaskImageOperation{AlphaMaskImageOperation::Additive, planetMaskListL, {0, 0}});
+        if (!planetMaskListR.empty())
+          rightMask = "?" + imageOperationToString(AlphaMaskImageOperation{AlphaMaskImageOperation::Additive, planetMaskListR, {0, 0}});
+
+        auto toAppend = getLR(baseImages + biomeHueShift);
+        appendHorizonLayer(zLevel, {toAppend.first + leftMask, toAppend.second + rightMask});
+      } else {
+        appendHorizonLayer(zLevel, getLR(baseImages + biomeHueShift));
+      }
+    };
+
+    auto appendHorizonEffects = [&](Json const& graphicsConfig, int zLevel) {
+      if (celestialParameters.getParameter("atmosphere", true).toBool())
+        appendHorizonLayer(zLevel, getLR(graphicsConfig.getString("atmosphereTextures")));
+      appendHorizonLayer(zLevel, getLR(graphicsConfig.getString("shadowTextures")));
+    };
+
+    appendHorizonBody(gfxConfig, 100);
+    appendHorizonEffects(gfxConfig, 300);
+
+    for (auto const& graphics : featureGraphics) {
+      for (auto const& imagePair : graphics.getArray("horizonBack", JsonArray{})) {
+        auto pair = imagePair.toArray();
+        appendHorizonLayer(0, {pair.get(0).toString(), pair.get(1).toString()});
       }
 
-      String leftMask, rightMask;
-      if (!planetMaskListL.empty())
-        leftMask = "?" + imageOperationToString(AlphaMaskImageOperation{AlphaMaskImageOperation::Additive, planetMaskListL, {0, 0}});
-      if (!planetMaskListR.empty())
-        rightMask = "?" + imageOperationToString(AlphaMaskImageOperation{AlphaMaskImageOperation::Additive, planetMaskListR, {0, 0}});
+      auto legacyGraphicsName = graphics.optString("terrestrialHorizonGraphicsOverlay");
+      if (!legacyGraphicsName)
+        legacyGraphicsName = graphics.optString("terrestrialHorizonGraphics");
+      if (legacyGraphicsName) {
+        auto featureConfig = jsonMerge(terrestrialHorizonGraphics.get("default"), terrestrialHorizonGraphics.get(*legacyGraphicsName));
+        appendHorizonBody(featureConfig, 400);
+        appendHorizonEffects(featureConfig, 400);
+      }
 
-      auto toAppend = getLR(baseImages + biomeHueShift);
-      res.append({toAppend.first + leftMask, toAppend.second + rightMask});
-    } else {
-      res.append(getLR(baseImages + biomeHueShift));
+      for (auto const& layer : graphics.getArray("horizonLayers", JsonArray{})) {
+        int zLevel = layer.getInt("zLevel", 200);
+        for (auto const& imagePair : layer.getArray("images", JsonArray{})) {
+          auto pair = imagePair.toArray();
+          appendHorizonLayer(zLevel, {pair.get(0).toString(), pair.get(1).toString()});
+        }
+
+        if (auto graphicsName = layer.optString("terrestrialHorizonGraphics")) {
+          auto featureConfig = jsonMerge(terrestrialHorizonGraphics.get("default"), terrestrialHorizonGraphics.get(*graphicsName));
+          auto parts = jsonToStringList(layer.get("parts", JsonArray{"body", "effects"}));
+          if (parts.contains("body"))
+            appendHorizonBody(featureConfig, zLevel);
+          if (parts.contains("effects"))
+            appendHorizonEffects(featureConfig, zLevel);
+        }
+      }
+
+      for (auto const& imagePair : graphics.getArray("horizonFront", JsonArray{})) {
+        auto pair = imagePair.toArray();
+        appendHorizonLayer(400, {pair.get(0).toString(), pair.get(1).toString()});
+      }
     }
 
-    if (celestialParameters.getParameter("atmosphere", true).toBool())
-      res.append(getLR(atmoTextures));
-
-    res.append(getLR(shadowTextures));
+    stableSort(orderedLayers, [](auto const& left, auto const& right) {
+      return left.first < right.first;
+    });
+    bool frontLayers = false;
+    for (auto& layer : orderedLayers) {
+      if (!frontLayers && layer.first > 300) {
+        // An empty pair is a serialized-compatible separator between the
+        // normal horizon pass and layers drawn above orbital clouds.
+        res.append({"", ""});
+        frontLayers = true;
+      }
+      res.append(std::move(layer.second));
+    }
 
   } else if (type == "Asteroids") {
     res.append(getLR(assets->json("/celestial.config:asteroidsHorizons").toString()));

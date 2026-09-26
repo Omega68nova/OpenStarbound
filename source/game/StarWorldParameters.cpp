@@ -5,6 +5,7 @@
 #include "StarAssets.hpp"
 #include "StarBiomeDatabase.hpp"
 #include "StarLiquidsDatabase.hpp"
+#include "StarLogging.hpp"
 
 namespace Star {
 
@@ -460,7 +461,703 @@ VisitableWorldParametersPtr netLoadVisitableWorldParameters(ByteArray data) {
   return parameters;
 }
 
-TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& typeName, String const& sizeName, uint64_t seed) {
+Maybe<Json> planetaryFeatureConfig(String const& featureName) {
+  auto features = Root::singleton().assets()->json("/terrestrial_worlds.config")
+      .get("planetaryFeatures", JsonObject{});
+  if (features.contains(featureName))
+    return features.get(featureName);
+  return {};
+}
+
+WeatherPool planetaryFeatureWeatherPool(StringList const& planetaryFeatures, String const& layerName) {
+  WeatherPool result;
+  auto assets = Root::singleton().assets();
+  for (auto const& featureName : planetaryFeatures) {
+    auto feature = planetaryFeatureConfig(featureName);
+    if (!feature) {
+      Logger::warn("Planetary feature '{}' is no longer defined; ignoring its weather additions", featureName);
+      continue;
+    }
+
+    auto layers = feature->getObject("layers", JsonObject{});
+    if (!layers.contains(layerName))
+      continue;
+
+    for (auto const& weatherPoolPath : layers.get(layerName).getArray("weatherPools", JsonArray{})) {
+      auto pool = jsonToWeightedPool<String>(assets->fetchJson(weatherPoolPath.toString()));
+      for (auto const& entry : pool.items())
+        result.add(entry.first, entry.second);
+    }
+  }
+  return result;
+}
+
+StringList selectPlanetaryFeatureDungeons(Json const& layerConfig, uint64_t seed, String const& featureName, String const& layerName) {
+  WeightedPool<String> dungeonPool = jsonToWeightedPool<String>(layerConfig.get("dungeons", JsonArray{}));
+  Vec2U dungeonCountRange = layerConfig.opt("dungeonCountRange").apply(jsonToVec2U).value(Vec2U());
+  if (dungeonCountRange[0] > dungeonCountRange[1])
+    throw StarException(strf("Planetary feature '{}' has an invalid dungeonCountRange for layer '{}'", featureName, layerName));
+
+  unsigned dungeonCount = staticRandomU32Range(dungeonCountRange[0], dungeonCountRange[1],
+      seed, layerName, featureName, "PlanetaryFeatureDungeonCount");
+  return dungeonPool.selectUniques(dungeonCount,
+      staticRandomHash64(seed, layerName, featureName, "PlanetaryFeatureDungeonChoice"));
+}
+
+void applyPlanetaryFeatureDungeons(StringList& dungeons, Json const& layerConfig,
+    uint64_t seed, String const& featureName, String const& layerName) {
+  if (layerConfig.getBool("replaceDungeons", false))
+    dungeons.clear();
+
+  for (auto const& dungeon : selectPlanetaryFeatureDungeons(layerConfig, seed, featureName, layerName)) {
+    if (!dungeons.contains(dungeon))
+      dungeons.append(dungeon);
+  }
+}
+
+namespace {
+
+enum class PlanetaryFeatureSelectionMode {
+  Root,
+  Guaranteed,
+  Random,
+  Alternative
+};
+
+struct PlanetaryFeatureSelectionNode;
+using PlanetaryFeatureSelectionNodePtr = shared_ptr<PlanetaryFeatureSelectionNode>;
+
+struct PlanetaryFeatureSelectionNode {
+  String reference;
+  String id;
+  String path;
+  bool group = false;
+  bool active = true;
+  PlanetaryFeatureSelectionMode mode = PlanetaryFeatureSelectionMode::Root;
+  PlanetaryFeatureSelectionNode* parent = nullptr;
+  List<PlanetaryFeatureSelectionNodePtr> children;
+};
+
+struct PlanetaryFeatureClaim {
+  String resource;
+  String featureId;
+  PlanetaryFeatureSelectionNode* feature;
+};
+
+pair<bool, String> parsePlanetaryFeatureReference(String const& reference) {
+  if (reference.beginsWith("feature:") && reference.size() > 8)
+    return {false, reference.substr(8)};
+  if (reference.beginsWith("group:") && reference.size() > 6)
+    return {true, reference.substr(6)};
+  throw StarException(strf("Invalid planetary feature reference '{}'; expected feature:<id> or group:<id>", reference));
+}
+
+double planetaryFeatureChance(Json const& value, String const& context) {
+  double chance = value.toDouble();
+  if (chance < 0.0 || chance > 1.0)
+    throw StarException(strf("Planetary feature chance at '{}' must be between 0 and 1", context));
+  return chance;
+}
+
+StringList sortedObjectKeys(JsonObject const& object) {
+  StringList keys;
+  for (auto const& entry : object)
+    keys.append(entry.first);
+  keys.sort();
+  return keys;
+}
+
+class PlanetaryFeatureSelector {
+public:
+  PlanetaryFeatureSelector(Json featureDefinitions, Json featureGroups, uint64_t seed)
+    : m_featureDefinitions(std::move(featureDefinitions)), m_featureGroups(std::move(featureGroups)), m_seed(seed) {}
+
+  StringList select(Json const& selectionConfig) {
+    if (selectionConfig.contains("maximumPlanetaryFeatures")
+        || selectionConfig.contains("planetaryFeatureChance")
+        || selectionConfig.contains("planetaryFeaturePool")) {
+      throw StarException("Legacy planetary feature slot configuration is not supported; configure typed references in planetaryFeatures");
+    }
+
+    auto roots = selectionConfig.getObject("planetaryFeatures", JsonObject{});
+    for (auto const& reference : sortedObjectKeys(roots))
+      validate(reference, strf("planetaryFeatures.{}", reference), {});
+    for (auto const& reference : sortedObjectKeys(roots)) {
+      double chance = planetaryFeatureChance(roots.get(reference), strf("planetaryFeatures.{}", reference));
+      String path = strf("root/{}", reference);
+      if (staticRandomDouble(m_seed, "PlanetaryFeatureChance", path) < chance)
+        m_roots.append(expand(reference, PlanetaryFeatureSelectionMode::Root, path, nullptr, {}));
+    }
+
+    validateGuaranteedSiblings();
+    resolveConflicts();
+
+    StringList selected;
+    StringSet present;
+    for (auto const& root : m_roots)
+      flatten(root.get(), selected, present);
+    return selected;
+  }
+
+private:
+  StringList exclusiveResources(String const& featureId) const {
+    StringList resources;
+    for (auto const& layer : m_featureDefinitions.get(featureId).getObject("layers", JsonObject{})) {
+      if (layer.second.contains("ocean"))
+        resources.append(strf("ocean:{}", layer.first));
+      if (layer.second.getBool("replaceDungeons", false))
+        resources.append(strf("replaceDungeons:{}", layer.first));
+    }
+    return resources;
+  }
+
+  void validate(String const& reference, String const& path, StringList groupStack) const {
+    auto parsed = parsePlanetaryFeatureReference(reference);
+    if (!parsed.first) {
+      if (!m_featureDefinitions.contains(parsed.second))
+        throw StarException(strf("Unknown planetary feature '{}' referenced at '{}'", parsed.second, path));
+      return;
+    }
+
+    if (!m_featureGroups.contains(parsed.second))
+      throw StarException(strf("Unknown planetary feature group '{}' referenced at '{}'", parsed.second, path));
+    if (groupStack.contains(parsed.second)) {
+      groupStack.append(parsed.second);
+      throw StarException(strf("Recursive planetary feature group cycle at '{}': {}", path, groupStack.join(" -> ")));
+    }
+    groupStack.append(parsed.second);
+
+    auto groupConfig = m_featureGroups.get(parsed.second);
+    for (auto const& key : sortedObjectKeys(groupConfig.toObject())) {
+      if (key != "guaranteed" && key != "random" && key != "alternative")
+        throw StarException(strf("Unknown planetary feature group property '{}' at '{}'", key, path));
+    }
+
+    auto guaranteed = groupConfig.getObject("guaranteed", JsonObject{});
+    StringMap<String> guaranteedResources;
+    for (auto const& childReference : sortedObjectKeys(guaranteed)) {
+      bool enabled = guaranteed.get(childReference).toBool();
+      auto child = parsePlanetaryFeatureReference(childReference);
+      if (enabled) {
+        if (!child.first && m_featureDefinitions.contains(child.second)) {
+          for (auto const& resource : exclusiveResources(child.second)) {
+            if (auto previous = guaranteedResources.maybe(resource)) {
+              throw StarException(strf("Planetary feature group '{}' has conflicting guaranteed siblings '{}' and '{}' for '{}'",
+                  path, *previous, child.second, resource));
+            }
+            guaranteedResources[resource] = child.second;
+          }
+        }
+      }
+      validate(childReference, strf("{}/guaranteed/{}", path, childReference), groupStack);
+    }
+
+    if (groupConfig.contains("random")) {
+      auto randomConfig = groupConfig.get("random");
+      for (auto const& key : sortedObjectKeys(randomConfig.toObject())) {
+        if (key != "maxCount" && key != "members")
+          throw StarException(strf("Unknown planetary feature random property '{}' at '{}'", key, path));
+      }
+      randomConfig.getUInt("maxCount", 0);
+      auto members = randomConfig.getObject("members", JsonObject{});
+      for (auto const& childReference : sortedObjectKeys(members)) {
+        planetaryFeatureChance(members.get(childReference), strf("{}/random/{}", path, childReference));
+        validate(childReference, strf("{}/random/{}", path, childReference), groupStack);
+      }
+    }
+
+    if (groupConfig.contains("alternative")) {
+      auto alternative = groupConfig.get("alternative");
+      for (auto const& key : sortedObjectKeys(alternative.toObject())) {
+        if (key != "chance" && key != "members")
+          throw StarException(strf("Unknown planetary feature alternative property '{}' at '{}'", key, path));
+      }
+      double chance = planetaryFeatureChance(alternative.get("chance", 1.0), strf("{}/alternative", path));
+      auto members = alternative.getObject("members", JsonObject{});
+      double totalWeight = 0.0;
+      for (auto const& childReference : sortedObjectKeys(members)) {
+        double weight = members.get(childReference).toDouble();
+        if (weight < 0.0)
+          throw StarException(strf("Planetary feature alternative '{}' has negative weight for '{}'", path, childReference));
+        totalWeight += weight;
+        validate(childReference, strf("{}/alternative/{}", path, childReference), groupStack);
+      }
+      if (chance > 0.0 && totalWeight <= 0.0)
+        throw StarException(strf("Planetary feature alternative '{}' has no positive-weight members", path));
+    }
+  }
+
+  PlanetaryFeatureSelectionNodePtr expand(String const& reference, PlanetaryFeatureSelectionMode mode,
+      String const& path, PlanetaryFeatureSelectionNode* parent, StringList groupStack) {
+    auto parsed = parsePlanetaryFeatureReference(reference);
+    auto node = make_shared<PlanetaryFeatureSelectionNode>();
+    node->reference = reference;
+    node->id = parsed.second;
+    node->path = path;
+    node->group = parsed.first;
+    node->mode = mode;
+    node->parent = parent;
+
+    if (!node->group) {
+      if (!m_featureDefinitions.contains(node->id))
+        throw StarException(strf("Unknown planetary feature '{}' referenced at '{}'", node->id, path));
+      return node;
+    }
+
+    if (!m_featureGroups.contains(node->id))
+      throw StarException(strf("Unknown planetary feature group '{}' referenced at '{}'", node->id, path));
+    if (groupStack.contains(node->id)) {
+      groupStack.append(node->id);
+      throw StarException(strf("Recursive planetary feature group cycle at '{}': {}", path, groupStack.join(" -> ")));
+    }
+    groupStack.append(node->id);
+
+    auto groupConfig = m_featureGroups.get(node->id);
+    auto guaranteed = groupConfig.getObject("guaranteed", JsonObject{});
+    for (auto const& childReference : sortedObjectKeys(guaranteed)) {
+      bool enabled = guaranteed.get(childReference).toBool();
+      parsePlanetaryFeatureReference(childReference);
+      if (enabled) {
+        String childPath = strf("{}/guaranteed/{}", path, childReference);
+        node->children.append(expand(childReference, PlanetaryFeatureSelectionMode::Guaranteed,
+            childPath, node.get(), groupStack));
+      }
+    }
+
+    if (groupConfig.contains("random")) {
+      auto randomConfig = groupConfig.get("random");
+      auto members = randomConfig.getObject("members", JsonObject{});
+      struct SuccessfulChild {
+        String reference;
+        uint64_t rank;
+      };
+      List<SuccessfulChild> successful;
+      for (auto const& childReference : sortedObjectKeys(members)) {
+        parsePlanetaryFeatureReference(childReference);
+        String childPath = strf("{}/random/{}", path, childReference);
+        double chance = planetaryFeatureChance(members.get(childReference), childPath);
+        if (staticRandomDouble(m_seed, "PlanetaryFeatureRandomChance", childPath) < chance)
+          successful.append({childReference, staticRandomHash64(m_seed, "PlanetaryFeatureRandomRank", childPath)});
+      }
+
+      size_t maxCount = randomConfig.getUInt("maxCount", successful.size());
+      std::sort(successful.begin(), successful.end(), [](auto const& a, auto const& b) {
+        if (a.rank != b.rank)
+          return a.rank < b.rank;
+        return a.reference < b.reference;
+      });
+      if (successful.size() > maxCount)
+        successful.resize(maxCount);
+      std::sort(successful.begin(), successful.end(), [](auto const& a, auto const& b) {
+        return a.reference < b.reference;
+      });
+      for (auto const& child : successful) {
+        String childPath = strf("{}/random/{}", path, child.reference);
+        node->children.append(expand(child.reference, PlanetaryFeatureSelectionMode::Random,
+            childPath, node.get(), groupStack));
+      }
+    }
+
+    if (groupConfig.contains("alternative")) {
+      auto alternative = groupConfig.get("alternative");
+      double chance = planetaryFeatureChance(alternative.get("chance", 1.0), strf("{}/alternative", path));
+      if (staticRandomDouble(m_seed, "PlanetaryFeatureAlternativeChance", path) < chance) {
+        auto members = alternative.getObject("members", JsonObject{});
+        WeightedPool<String> pool;
+        for (auto const& childReference : sortedObjectKeys(members)) {
+          parsePlanetaryFeatureReference(childReference);
+          double weight = members.get(childReference).toDouble();
+          if (weight < 0.0)
+            throw StarException(strf("Planetary feature alternative '{}' has negative weight for '{}'", path, childReference));
+          pool.add(weight, childReference);
+        }
+        if (pool.empty())
+          throw StarException(strf("Planetary feature alternative '{}' has no positive-weight members", path));
+        String childReference = pool.select(staticRandomHash64(m_seed, "PlanetaryFeatureAlternativeSelection", path));
+        String childPath = strf("{}/alternative/{}", path, childReference);
+        node->children.append(expand(childReference, PlanetaryFeatureSelectionMode::Alternative,
+            childPath, node.get(), groupStack));
+      }
+    }
+
+    return node;
+  }
+
+  bool active(PlanetaryFeatureSelectionNode const* node) const {
+    for (; node; node = node->parent) {
+      if (!node->active)
+        return false;
+    }
+    return true;
+  }
+
+  bool descendantOf(PlanetaryFeatureSelectionNode const* node, PlanetaryFeatureSelectionNode const* ancestor) const {
+    for (; node; node = node->parent) {
+      if (node == ancestor)
+        return true;
+    }
+    return false;
+  }
+
+  PlanetaryFeatureSelectionNode* pruningRoot(PlanetaryFeatureSelectionNode* feature) const {
+    auto node = feature;
+    while (node->mode == PlanetaryFeatureSelectionMode::Guaranteed && node->parent)
+      node = node->parent;
+    return node;
+  }
+
+  List<PlanetaryFeatureClaim> featureClaims(PlanetaryFeatureSelectionNode* feature) const {
+    List<PlanetaryFeatureClaim> claims;
+    for (auto const& resource : exclusiveResources(feature->id))
+      claims.append({resource, feature->id, feature});
+    return claims;
+  }
+
+  void collectFeatures(PlanetaryFeatureSelectionNode* node, List<PlanetaryFeatureSelectionNode*>& features) const {
+    if (!active(node))
+      return;
+    if (!node->group)
+      features.append(node);
+    for (auto const& child : node->children)
+      collectFeatures(child.get(), features);
+  }
+
+  List<PlanetaryFeatureSelectionNode*> currentFeatures() const {
+    List<PlanetaryFeatureSelectionNode*> features;
+    for (auto const& root : m_roots)
+      collectFeatures(root.get(), features);
+    return features;
+  }
+
+  void collectGroups(PlanetaryFeatureSelectionNode* node, List<PlanetaryFeatureSelectionNode*>& groups) const {
+    if (node->group)
+      groups.append(node);
+    for (auto const& child : node->children)
+      collectGroups(child.get(), groups);
+  }
+
+  void validateGuaranteedSiblings() const {
+    List<PlanetaryFeatureSelectionNode*> groups;
+    for (auto const& root : m_roots)
+      collectGroups(root.get(), groups);
+    for (auto const& group : groups) {
+      StringMap<String> resources;
+      for (auto const& child : group->children) {
+        if (child->mode != PlanetaryFeatureSelectionMode::Guaranteed || child->group)
+          continue;
+        for (auto const& claim : featureClaims(child.get())) {
+          if (auto previous = resources.maybe(claim.resource)) {
+            if (*previous != claim.featureId)
+              throw StarException(strf("Planetary feature group '{}' has conflicting guaranteed siblings '{}' and '{}' for '{}'",
+                  group->path, *previous, claim.featureId, claim.resource));
+          } else {
+            resources[claim.resource] = claim.featureId;
+          }
+        }
+      }
+    }
+  }
+
+  uint64_t conflictRank(String const& resource, PlanetaryFeatureSelectionNode const* branch) const {
+    return staticRandomHash64(m_seed, "PlanetaryFeatureConflictRank", resource, branch->path);
+  }
+
+  void discard(PlanetaryFeatureSelectionNode* branch, String const& resource, String const& winner = {}) {
+    if (!branch->active)
+      return;
+    branch->active = false;
+    if (winner.empty())
+      Logger::warn("Discarding planetary feature bundle '{}' due to internal conflict for '{}'", branch->path, resource);
+    else
+      Logger::warn("Discarding planetary feature bundle '{}' due to conflict for '{}'; '{}' won", branch->path, resource, winner);
+  }
+
+  bool resolveOceanConflict(String const& resource, List<PlanetaryFeatureClaim> const& claims) {
+    StringMap<List<PlanetaryFeatureClaim>> byFeature;
+    for (auto const& claim : claims)
+      byFeature[claim.featureId].append(claim);
+    if (byFeature.size() <= 1)
+      return false;
+
+    StringMap<StringSet> featuresByBranchPath;
+    StringMap<PlanetaryFeatureSelectionNode*> branches;
+    for (auto const& claim : claims) {
+      auto branch = pruningRoot(claim.feature);
+      branches[branch->path] = branch;
+      featuresByBranchPath[branch->path].add(claim.featureId);
+    }
+    for (auto const& entry : featuresByBranchPath) {
+      if (entry.second.size() > 1) {
+        discard(branches.get(entry.first), resource);
+        return true;
+      }
+    }
+
+    PlanetaryFeatureSelectionNode* winner = nullptr;
+    uint64_t winnerRank = 0;
+    for (auto const& entry : branches) {
+      uint64_t rank = conflictRank(resource, entry.second);
+      if (!winner || rank < winnerRank) {
+        winner = entry.second;
+        winnerRank = rank;
+      }
+    }
+    String winnerFeature;
+    for (auto const& claim : claims) {
+      if (pruningRoot(claim.feature) == winner) {
+        winnerFeature = claim.featureId;
+        break;
+      }
+    }
+    for (auto const& entry : branches) {
+      // Repeated references to the same feature produce the same ocean
+      // configuration and are deduplicated when flattened.  Preserve all of
+      // those bundles once that feature wins, rather than discarding an
+      // otherwise non-conflicting occurrence solely because its path differs.
+      if (!featuresByBranchPath.get(entry.first).contains(winnerFeature))
+        discard(entry.second, resource, winner->path);
+    }
+    return branches.size() > 1;
+  }
+
+  bool resolveDungeonConflict(String const& layerName, List<PlanetaryFeatureSelectionNode*> const& features) {
+    List<PlanetaryFeatureSelectionNode*> replacements;
+    List<PlanetaryFeatureSelectionNode*> additions;
+    for (auto feature : features) {
+      auto layers = m_featureDefinitions.get(feature->id).getObject("layers", JsonObject{});
+      if (!layers.contains(layerName))
+        continue;
+      auto layer = layers.get(layerName);
+      if (layer.getBool("replaceDungeons", false))
+        replacements.append(feature);
+      if (!layer.getArray("dungeons", JsonArray{}).empty())
+        additions.append(feature);
+    }
+    if (replacements.empty())
+      return false;
+
+    String resource = strf("dungeons:{}", layerName);
+    StringMap<PlanetaryFeatureSelectionNode*> replacementBranches;
+    StringMap<StringSet> replacementIdsByBranch;
+    for (auto replacement : replacements) {
+      auto branch = pruningRoot(replacement);
+      replacementBranches[branch->path] = branch;
+      replacementIdsByBranch[branch->path].add(replacement->id);
+    }
+    for (auto const& entry : replacementIdsByBranch) {
+      if (entry.second.size() > 1) {
+        discard(replacementBranches.get(entry.first), resource);
+        return true;
+      }
+    }
+
+    StringMap<PlanetaryFeatureSelectionNode*> candidates = replacementBranches;
+    for (auto addition : additions) {
+      bool insideReplacement = false;
+      for (auto const& replacement : replacementBranches) {
+        if (descendantOf(addition, replacement.second)) {
+          insideReplacement = true;
+          break;
+        }
+      }
+      if (!insideReplacement) {
+        auto branch = pruningRoot(addition);
+        candidates[branch->path] = branch;
+      }
+    }
+    if (candidates.size() <= 1)
+      return false;
+
+    PlanetaryFeatureSelectionNode* winner = nullptr;
+    uint64_t winnerRank = 0;
+    for (auto const& candidate : candidates) {
+      uint64_t rank = conflictRank(resource, candidate.second);
+      if (!winner || rank < winnerRank) {
+        winner = candidate.second;
+        winnerRank = rank;
+      }
+    }
+
+    bool replacementWon = replacementBranches.contains(winner->path);
+    if (replacementWon) {
+      for (auto const& candidate : candidates) {
+        if (candidate.second != winner && !descendantOf(candidate.second, winner))
+          discard(candidate.second, resource, winner->path);
+      }
+    } else {
+      for (auto const& replacement : replacementBranches)
+        discard(replacement.second, resource, winner->path);
+    }
+    return true;
+  }
+
+  void resolveConflicts() {
+    while (true) {
+      auto features = currentFeatures();
+      StringMap<List<PlanetaryFeatureClaim>> oceanClaims;
+      StringSet dungeonLayers;
+      for (auto feature : features) {
+        auto layers = m_featureDefinitions.get(feature->id).getObject("layers", JsonObject{});
+        for (auto const& layer : layers) {
+          if (layer.second.contains("ocean"))
+            oceanClaims[strf("ocean:{}", layer.first)].append({strf("ocean:{}", layer.first), feature->id, feature});
+          if (layer.second.getBool("replaceDungeons", false))
+            dungeonLayers.add(layer.first);
+        }
+      }
+
+      bool changed = false;
+      for (auto const& resource : oceanClaims.keys().sorted()) {
+        if (resolveOceanConflict(resource, oceanClaims.get(resource))) {
+          changed = true;
+          break;
+        }
+      }
+      if (changed)
+        continue;
+
+      for (auto const& layerName : dungeonLayers.values().sorted()) {
+        if (resolveDungeonConflict(layerName, features)) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed)
+        break;
+    }
+  }
+
+  void flatten(PlanetaryFeatureSelectionNode const* node, StringList& selected, StringSet& present) const {
+    if (!active(node))
+      return;
+    if (!node->group && present.add(node->id))
+      selected.append(node->id);
+    for (auto const& child : node->children)
+      flatten(child.get(), selected, present);
+  }
+
+  Json m_featureDefinitions;
+  Json m_featureGroups;
+  uint64_t m_seed;
+  List<PlanetaryFeatureSelectionNodePtr> m_roots;
+};
+
+}
+
+StringList selectPlanetaryFeaturesFromConfig(Json const& selectionConfig, Json const& featureDefinitions,
+    uint64_t seed, Json const& featureGroups) {
+  return PlanetaryFeatureSelector(featureDefinitions, featureGroups, seed).select(selectionConfig);
+}
+
+StringList selectPlanetaryFeatures(String const& typeName, String const& sizeName, uint64_t seed) {
+  auto terrestrialConfig = Root::singleton().assets()->json("/terrestrial_worlds.config");
+  auto config = jsonMerge(terrestrialConfig.get("planetDefaults"),
+      terrestrialConfig.get("planetSizes").get(sizeName),
+      terrestrialConfig.get("planetTypes").get(typeName));
+  return selectPlanetaryFeaturesFromConfig(config, terrestrialConfig.get("planetaryFeatures", JsonObject{}), seed,
+      terrestrialConfig.get("planetaryFeatureGroups", JsonObject{}));
+}
+
+Json environmentStatusEffectPoliciesFromConfig(Json const& planetConfig,
+    Json const& featureDefinitions, StringList const& planetaryFeatures) {
+  auto modeRank = [](String const& mode, String const& context) -> unsigned {
+    if (mode == "global")
+      return 0;
+    if (mode == "layer")
+      return 1;
+    if (mode == "region")
+      return 2;
+    throw StarException(strf("Unknown environmentStatusEffectsMode '{}' at '{}'", mode, context));
+  };
+
+  struct ResolvedPolicy {
+    String mode;
+    unsigned rank;
+    bool keepPrimary;
+  };
+
+  auto layers = planetConfig.getObject("layers", JsonObject{});
+  auto layerDefaults = planetConfig.get("layerDefaults", JsonObject{});
+  String planetMode = planetConfig.getString("environmentStatusEffectsMode", "global");
+  modeRank(planetMode, "planet");
+  bool planetKeepPrimary = planetConfig.getBool("keepPrimaryRegionStatusEffectsAlways", false);
+
+  StringMap<ResolvedPolicy> resolved;
+  for (auto const& layer : layers) {
+    auto layerConfig = jsonMerge(layerDefaults, layer.second);
+    String mode = layerConfig.getString("environmentStatusEffectsMode", planetMode);
+    resolved[layer.first] = ResolvedPolicy{
+        mode,
+        modeRank(mode, strf("layers.{}", layer.first)),
+        layerConfig.getBool("keepPrimaryRegionStatusEffectsAlways", planetKeepPrimary)};
+  }
+
+  for (auto const& featureName : planetaryFeatures) {
+    if (!featureDefinitions.contains(featureName))
+      continue;
+
+    auto feature = featureDefinitions.get(featureName);
+    auto featureMode = feature.optString("environmentStatusEffectsMode");
+    Maybe<unsigned> featureModeRank;
+    if (featureMode)
+      featureModeRank = modeRank(*featureMode, strf("planetaryFeatures.{}", featureName));
+    auto featureKeepPrimary = feature.optBool("keepPrimaryRegionStatusEffectsAlways");
+    auto featureLayers = feature.getObject("layers", JsonObject{});
+    for (auto const& featureLayer : featureLayers) {
+      if (auto layerMode = featureLayer.second.optString("environmentStatusEffectsMode"))
+        modeRank(*layerMode,
+            strf("planetaryFeatures.{}.layers.{}", featureName, featureLayer.first));
+      (void)featureLayer.second.optBool("keepPrimaryRegionStatusEffectsAlways");
+    }
+
+    for (auto const& layer : layers) {
+      auto& policy = resolved[layer.first];
+      Maybe<String> mode = featureMode;
+      Maybe<unsigned> rank = featureModeRank;
+      Maybe<bool> keepPrimary = featureKeepPrimary;
+
+      if (featureLayers.contains(layer.first)) {
+        auto featureLayer = featureLayers.get(layer.first);
+        if (auto layerMode = featureLayer.optString("environmentStatusEffectsMode")) {
+          mode = *layerMode;
+          rank = modeRank(*layerMode,
+              strf("planetaryFeatures.{}.layers.{}", featureName, layer.first));
+        }
+        if (auto layerKeepPrimary = featureLayer.optBool("keepPrimaryRegionStatusEffectsAlways"))
+          keepPrimary = *layerKeepPrimary;
+      }
+
+      if (mode && *rank > policy.rank) {
+        policy.mode = *mode;
+        policy.rank = *rank;
+      }
+      if (keepPrimary && *keepPrimary)
+        policy.keepPrimary = true;
+    }
+  }
+
+  JsonObject result;
+  for (auto const& layerName : resolved.keys().sorted()) {
+    auto const& policy = resolved.get(layerName);
+    result[layerName] = JsonObject{
+        {"mode", policy.mode},
+        {"keepPrimaryRegionStatusEffectsAlways", policy.keepPrimary}};
+  }
+  return result;
+}
+
+Json environmentStatusEffectPolicies(String const& typeName, String const& sizeName,
+    StringList const& planetaryFeatures) {
+  auto terrestrialConfig = Root::singleton().assets()->json("/terrestrial_worlds.config");
+  auto config = jsonMerge(terrestrialConfig.get("planetDefaults"),
+      terrestrialConfig.get("planetSizes").get(sizeName),
+      terrestrialConfig.get("planetTypes").get(typeName));
+  return environmentStatusEffectPoliciesFromConfig(config,
+      terrestrialConfig.get("planetaryFeatures", JsonObject{}), planetaryFeatures);
+}
+
+TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(
+    String const& typeName, String const& sizeName, uint64_t seed, StringList const& planetaryFeatures) {
   auto& root = Root::singleton();
   auto assets = root.assets();
   auto liquidsDatabase = root.liquidsDatabase();
@@ -475,6 +1172,35 @@ TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& t
   auto sizeConfig = terrestrialConfig.get("planetSizes").get(sizeName);
   auto typeConfig = terrestrialConfig.get("planetTypes").get(typeName);
   auto config = jsonMerge(baseConfig, sizeConfig, typeConfig);
+
+  List<pair<String, Json>> featureConfigs;
+  for (auto const& featureName : planetaryFeatures) {
+    if (auto feature = planetaryFeatureConfig(featureName))
+      featureConfigs.append({featureName, feature.take()});
+    else
+      Logger::warn("Planetary feature '{}' is no longer defined; ignoring its runtime generation effects", featureName);
+  }
+
+  auto appendUniqueStrings = [](JsonArray base, JsonArray const& additions) {
+    StringSet present;
+    for (auto const& value : base)
+      present.add(value.toString());
+    for (auto const& value : additions) {
+      if (present.add(value.toString()))
+        base.append(value);
+    }
+    return base;
+  };
+
+  auto featureLayerConfigs = [&featureConfigs](String const& layerName) {
+    List<pair<String, Json>> layers;
+    for (auto const& feature : featureConfigs) {
+      auto featureLayers = feature.second.getObject("layers", JsonObject{});
+      if (featureLayers.contains(layerName))
+        layers.append({feature.first, featureLayers.get(layerName)});
+    }
+    return layers;
+  };
 
   auto gravityRange = jsonToVec2F(config.get("gravityRange"));
   auto dayLengthRange = jsonToVec2F(config.get("dayLengthRange"));
@@ -521,11 +1247,30 @@ TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& t
     return region;
   };
 
-  auto readLayer = [readRegion, regionDefaults, regionTypes, seed, config](String const& layerName) -> Maybe<TerrestrialWorldParameters::TerrestrialLayer> {
+  auto readLayer = [readRegion, regionDefaults, regionTypes, seed, config, appendUniqueStrings, featureLayerConfigs](String const& layerName) -> Maybe<TerrestrialWorldParameters::TerrestrialLayer> {
     if (!config.get("layers").contains(layerName))
       return {};
 
     auto layerConfig = jsonMerge(config.get("layerDefaults"), config.get("layers").get(layerName));
+
+    JsonArray primaryRegionList = layerConfig.getArray("primaryRegion", JsonArray{});
+    JsonArray secondaryRegionList = layerConfig.getArray("secondaryRegions", JsonArray{});
+    int secondaryRegionCountAdd = 0;
+    JsonArray addedSubRegions;
+    Json oceanConfig = JsonObject{};
+    auto featureLayers = featureLayerConfigs(layerName);
+    for (auto const& namedFeatureLayer : featureLayers) {
+      auto const& featureLayer = namedFeatureLayer.second;
+      primaryRegionList = appendUniqueStrings(std::move(primaryRegionList), featureLayer.getArray("primaryRegions", JsonArray{}));
+      secondaryRegionList = appendUniqueStrings(std::move(secondaryRegionList), featureLayer.getArray("secondaryRegions", JsonArray{}));
+      addedSubRegions = appendUniqueStrings(std::move(addedSubRegions), featureLayer.getArray("subRegions", JsonArray{}));
+      int countAdd = featureLayer.getInt("secondaryRegionCountAdd", 0);
+      if (countAdd < 0)
+        throw StarException("secondaryRegionCountAdd must be nonnegative");
+      secondaryRegionCountAdd += countAdd;
+      if (featureLayer.contains("ocean"))
+        oceanConfig = jsonMerge(oceanConfig, featureLayer.get("ocean"));
+    }
 
     if (!layerConfig || !layerConfig.getBool("enabled"))
       return {};
@@ -535,9 +1280,11 @@ TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& t
     layer.layerMinHeight = static_cast<int>(layerConfig.getFloat("layerLevel"));
     layer.layerBaseHeight = static_cast<int>(layerConfig.getFloat("baseHeight"));
 
-    auto primaryRegionList = layerConfig.getArray("primaryRegion");
     auto primaryRegionConfigName = staticRandomFrom(primaryRegionList, seed, layerName.utf8Ptr(), "PrimaryRegionSelection").toString();
     Json primaryRegionConfig = jsonMerge(regionDefaults, regionTypes.get(primaryRegionConfigName));
+    primaryRegionConfig = primaryRegionConfig.set("subRegion",
+        appendUniqueStrings(primaryRegionConfig.getArray("subRegion", JsonArray{}), addedSubRegions));
+    primaryRegionConfig = jsonMerge(primaryRegionConfig, oceanConfig);
     layer.primaryRegion = readRegion(primaryRegionConfig, layerName, layer.layerBaseHeight);
 
     {
@@ -549,18 +1296,23 @@ TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& t
       } else {
         subRegionConfig = primaryRegionConfig;
       }
+      subRegionConfig = jsonMerge(subRegionConfig, oceanConfig);
       layer.primarySubRegion = readRegion(subRegionConfig, layerName, layer.layerBaseHeight);
     }
 
     Vec2U secondaryRegionCountRange = jsonToVec2U(layerConfig.get("secondaryRegionCount"));
+    secondaryRegionCountRange[0] += secondaryRegionCountAdd;
+    secondaryRegionCountRange[1] += secondaryRegionCountAdd;
     int secondaryRegionCount = staticRandomI32Range(static_cast<int>(secondaryRegionCountRange[0]), static_cast<int>(secondaryRegionCountRange[1]), seed, layerName, "SecondaryRegionCount");
-    auto secondaryRegionList = layerConfig.getArray("secondaryRegions");
     if (!secondaryRegionList.empty()) {
       staticRandomShuffle(secondaryRegionList, seed, layerName, "SecondaryRegionShuffle");
       for (const auto& regionName : secondaryRegionList) {
         if (secondaryRegionCount <= 0)
           break;
         Json secondaryRegionConfig = jsonMerge(regionDefaults, regionTypes.get(regionName.toString()));
+        secondaryRegionConfig = secondaryRegionConfig.set("subRegion",
+            appendUniqueStrings(secondaryRegionConfig.getArray("subRegion", JsonArray{}), addedSubRegions));
+        secondaryRegionConfig = jsonMerge(secondaryRegionConfig, oceanConfig);
         layer.secondaryRegions.append(readRegion(secondaryRegionConfig, layerName, layer.layerBaseHeight));
 
         auto subRegionList = secondaryRegionConfig.getArray("subRegion");
@@ -571,6 +1323,7 @@ TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& t
         } else {
           subRegionConfig = secondaryRegionConfig;
         }
+        subRegionConfig = jsonMerge(subRegionConfig, oceanConfig);
         layer.secondarySubRegions.append(readRegion(subRegionConfig, layerName, layer.layerBaseHeight));
 
         --secondaryRegionCount;
@@ -584,6 +1337,22 @@ TerrestrialWorldParametersPtr generateTerrestrialWorldParameters(String const& t
     Vec2U dungeonCountRange = layerConfig.opt("dungeonCountRange").apply(jsonToVec2U).value();
     unsigned dungeonCount = staticRandomU32Range(dungeonCountRange[0], dungeonCountRange[1], seed, layerName, "DungeonCount");
     layer.dungeons.appendAll(dungeonPool.selectUniques(dungeonCount, staticRandomHash64(seed, layerName, "DungeonChoice")));
+    bool replacementApplied = false;
+    for (auto const& namedFeatureLayer : featureLayers) {
+      if (namedFeatureLayer.second.getBool("replaceDungeons", false)) {
+        if (!replacementApplied) {
+          applyPlanetaryFeatureDungeons(layer.dungeons, namedFeatureLayer.second, seed, namedFeatureLayer.first, layerName);
+          replacementApplied = true;
+        } else {
+          Logger::warn("Ignoring additional dungeon replacement from planetary feature '{}' in layer '{}'",
+              namedFeatureLayer.first, layerName);
+        }
+      }
+    }
+    for (auto const& namedFeatureLayer : featureLayers) {
+      if (!namedFeatureLayer.second.getBool("replaceDungeons", false))
+        applyPlanetaryFeatureDungeons(layer.dungeons, namedFeatureLayer.second, seed, namedFeatureLayer.first, layerName);
+    }
     layer.dungeonXVariance = static_cast<int>(layerConfig.getInt("dungeonXVariance", 0));
 
     return layer;

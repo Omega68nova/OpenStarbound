@@ -79,8 +79,10 @@ struct SkyWorldHorizon {
   float scale;
   float rotation;
 
-  // List of L/R images for each layer of the world horizon, bottom to top.
+  // Lists of L/R images for each layer of the world horizon, bottom to top.
+  // Front layers are rendered after orbital clouds and parallax.
   List<pair<String, String>> layers;
+  List<pair<String, String>> frontLayers;
 };
 
 }

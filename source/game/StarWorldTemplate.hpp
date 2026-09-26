@@ -30,6 +30,15 @@ public:
     int maxHeight;
   };
 
+  // A vertical terrestrial layer independent of any subsystem-specific state.
+  // Entries are ordered from the bottom of the world to the top.
+  struct TerrestrialLayerInfo {
+    String name;
+    TerrestrialWorldParameters::TerrestrialLayer const* parameters;
+    int minHeight;
+    int maxHeight;
+  };
+
   struct Dungeon {
     String dungeon;
     int baseHeight;
@@ -93,6 +102,7 @@ public:
   Json store() const;
 
   Maybe<CelestialParameters> const& celestialParameters() const;
+  StringList planetaryFeatures() const;
   VisitableWorldParametersConstPtr worldParameters() const;
   SkyParameters skyParameters() const;
   WorldLayoutPtr worldLayout() const;
@@ -174,6 +184,9 @@ public:
   WeatherDomain const* weatherDomain(String const& name) const;
   WeatherLayer const* weatherLayerAt(Vec2I const& position) const;
 
+  List<TerrestrialLayerInfo> const& terrestrialLayers() const;
+  TerrestrialLayerInfo const* terrestrialLayerAt(Vec2I const& position) const;
+
   // Return potential items that would spawn at the given block.
 	void addPotentialBiomeItems(int x, int y, PotentialBiomeItems& items, List<BiomeItemDistribution> const& distributions, BiomePlacementArea area, Maybe<BiomePlacementMode> mode = {}) const;
   PotentialBiomeItems potentialBiomeItemsAt(int x, int y) const;
@@ -188,6 +201,17 @@ public:
   uint64_t seedFor(int x, int y) const;
 
 private:
+  enum class EnvironmentStatusEffectsMode {
+    Global,
+    Layer,
+    Region
+  };
+
+  struct EnvironmentStatusEffectPolicy {
+    EnvironmentStatusEffectsMode mode = EnvironmentStatusEffectsMode::Global;
+    bool keepPrimaryRegionStatusEffectsAlways = false;
+  };
+
   struct CustomTerrainRegion {
     PolyF region;
     RectF regionBounds;
@@ -197,6 +221,7 @@ private:
   WorldTemplate();
 
   void determineWorldName();
+  void setupTerrestrialLayers();
   void setupWeatherDomains();
 
   pair<float, float> customTerrainWeighting(int x, int y) const;
@@ -218,6 +243,8 @@ private:
 
   List<WeatherDomain> m_weatherDomains;
   List<WeatherLayer> m_weatherLayers;
+  List<TerrestrialLayerInfo> m_terrestrialLayers;
+  StringMap<EnvironmentStatusEffectPolicy> m_environmentStatusEffectPolicies;
 
   List<CustomTerrainRegion> m_customTerrainRegions;
 

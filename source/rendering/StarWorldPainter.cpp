@@ -105,6 +105,10 @@ void WorldPainter::render(WorldRenderData& renderData, function<bool()> lightWai
   if (!renderData.parallaxLayers.empty())
     m_environmentPainter->renderParallaxLayers(m_parallaxWorldPosition, m_camera, renderData.parallaxLayers, renderData.skyRenderData);
 
+  // Feature horizon layers above the canonical atmosphere stage render over
+  // orbital clouds and any parallax layers.
+  m_environmentPainter->renderPlanetHorizon(orbiterAndPlanetRatio, Vec2F(m_camera.screenSize()), renderData.skyRenderData, true);
+
   // Main world layers
 
   Map<EntityRenderLayer, List<pair<EntityHighlightEffect, List<Drawable>>>> entityDrawables;
