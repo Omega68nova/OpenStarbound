@@ -300,7 +300,7 @@ An example of intended mod-driven usage:
 -- the actual world height: its existing space layer stays intact.
 universe.loadSubWorld(planetWorldId)
 universe.setCompositeWorldPlacement(planetWorldId, {0, 0})
-universe.setCompositeWorldPlacement(shipWorldId, {0, planetHeight + 128})
+universe.setCompositeWorldPlacement(shipWorldId, {0, planetHeight + 8})
 
 -- When the planet is out of view:
 universe.clearCompositeWorldPlacement(planetWorldId)
