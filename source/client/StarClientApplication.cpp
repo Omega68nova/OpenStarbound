@@ -528,10 +528,13 @@ void ClientApplication::render() {
       StringSet registeredWorlds;
       for (auto const& entry : m_universeClient->compositeWorldPlacements())
         registeredWorlds.add(entry.getString("worldId"));
-      for (auto const& worldKey : m_compositeWorldPainters.keys()) {
-        if (!registeredWorlds.contains(worldKey))
-          m_compositeWorldPainters.remove(worldKey);
+      List<String> detachedPainterIds;
+      for (auto const& painter : m_compositeWorldPainters) {
+        if (!registeredWorlds.contains(painter.first))
+          detachedPainterIds.append(painter.first);
       }
+      for (auto const& worldKey : detachedPainterIds)
+        m_compositeWorldPainters.remove(worldKey);
       LogMap::set("client_render_world_total", strf(u8"{:05d}\u00b5s", Time::monotonicMicroseconds() - totalStart));
       
       auto size = Vec2F(renderer->screenSize());
