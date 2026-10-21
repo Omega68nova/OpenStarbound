@@ -103,6 +103,11 @@ LuaCallbacks LuaBindings::makeUniverseClientThreadCallbacks(UniverseClient* univ
 LuaCallbacks LuaBindings::makeUniverseClientCallbacks(UniverseClient* universe) {
   LuaCallbacks callbacks = makeUniverseClientThreadCallbacks(universe);
   
+  // Generic main-world introspection for client-side composition mods.
+  callbacks.registerCallback("playerWorldId", [universe]() -> String {
+    return printWorldId(universe->playerWorld());
+  });
+
   callbacks.registerCallback("subWorldActive", [universe](String const& worldId) -> bool {
     return universe->subWorldExistsOnWorld(parseWorldId(worldId));
   });
