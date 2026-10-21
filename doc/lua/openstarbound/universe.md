@@ -256,6 +256,55 @@ If a subworld is active on the given world, unloads it.
 
 ---
 
+#### `void` universe.setCompositeWorldPlacement(`String` worldId, `Vec2I` offset)
+
+Registers or replaces a client-local virtual placement for the given world ID.
+Coordinates in that world map to virtual coordinates by adding `offset`.
+Placements do not modify the underlying worlds, world files, gravity, physics, or planet heights.
+
+**Experimental foundation:** placements are recorded and queryable, but the
+renderer, camera, and server-authoritative boundary transfer are **not yet
+connected** to this registry. Calling this function alone does not display
+another world. For now, scripts may separately call `loadSubWorld` to
+request a secondary world on the server.
+
+---
+
+#### `void` universe.clearCompositeWorldPlacement(`String` worldId)
+
+Removes a virtual placement without unloading or modifying the corresponding
+world. To release a secondary-world subscription, the mod can separately call
+`unloadSubWorld` when it is safe to do so (for example, when out of frame).
+Placements are cleared when the universe client disconnects or resets.
+
+---
+
+#### `Json[]` universe.compositeWorldPlacements()
+
+Returns the registered placements as objects with `worldId` and integer
+`offset` fields. This is client-local state, not a network-synchronized
+authoritative composite.
+
+An example of intended mod-driven usage:
+
+```lua
+-- planetWorldId is the full ID of a real world, and planetHeight is
+-- the actual world height: its existing space layer stays intact.
+universe.loadSubWorld(planetWorldId)
+universe.setCompositeWorldPlacement(planetWorldId, {0, 0})
+universe.setCompositeWorldPlacement(shipWorldId, {0, planetHeight + 128})
+
+-- When the planet is out of view:
+universe.clearCompositeWorldPlacement(planetWorldId)
+universe.clearCompositeWorldPlacement(shipWorldId)
+universe.unloadSubWorld(planetWorldId)
+```
+
+The sample describes placement/lifecycle intent only; it does not yet
+produce composite rendering or seamless inter-world travel.
+
+---
+
 #### `RpcPromise<Json>` universe.sendSubWorldMessage(`String` worldId, `String` messageName, [`Json` args ...])
 
 Loads the given world as a subworld if it is not loaded.
