@@ -82,8 +82,10 @@ inline void WorldCamera::setWorldGeometry(WorldGeometry geometry) {
 }
 
 inline void WorldCamera::setVerticalClamping(bool enabled) {
-  m_clampVertical = enabled;
-  setCenterWorldPosition(m_rawWorldCenter, true);
+  if (m_clampVertical != enabled) {
+    m_clampVertical = enabled;
+    setCenterWorldPosition(m_rawWorldCenter, true);
+  }
 }
 
 inline WorldGeometry WorldCamera::worldGeometry() const {
