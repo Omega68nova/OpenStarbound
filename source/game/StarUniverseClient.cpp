@@ -889,10 +889,157 @@ ClientSubWorldId UniverseClient::getSubWorldOnWorld(WorldId worldId) {
 }
 
 void UniverseClient::destroySubWorldOnWorld(WorldId worldId) {
-  if (!m_subWorlds.hasRightValue(worldId)) {
+  // A detached world must not keep a stale virtual placement or a keepalive.
+  clearCompositeWorldPlacement(worldId);
+  if (!m_subWorlds.hasRightValue(worldId))
     return;
-  }
   setSubWorldWorld(m_subWorlds.getLeft(worldId), WorldId());
+}
+
+void UniverseClient::setCompositeWorldPlacement(WorldId const& worldId, Vec2I const& offset) {
+  if (!worldId)
+    throw StarException("Cannot place an empty world in a composite view");
+
+  // Declarative placement only. Scripts control subworld subscriptions and
+  // lifetime separately through loadSubWorld / unloadSubWorld.
+  RecursiveMutexLocker locker(m_mutex);
+  m_compositeWorldPlacements.set(printWorldId(worldId), CompositeWorldPlacement{worldId, offset});
+}
+
+void UniverseClient::clearCompositeWorldPlacement(WorldId const& worldId) {
+  WorldClientThreadPtr thread;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    if (!worldId)
+      return;
+    m_compositeWorldPlacements.remove(printWorldId(worldId));
+    if (m_subWorlds.hasRightValue(worldId)) {
+      auto id = m_subWorlds.getLeft(worldId);
+      if (m_subWorldThreads.contains(id))
+        thread = m_subWorldThreads.get(id);
+    }
+  }
+
+  // Stop keeping a headless world alive when its placement is unregistered.
+  // Never hold the universe mutex across the world thread's update mutex.
+  if (thread)
+    thread->executeAction([](WorldClientThread*, WorldClient* world) {
+      world->disableCompositeRendering();
+    });
+}
+
+JsonArray UniverseClient::compositeWorldPlacements() const {
+  RecursiveMutexLocker locker(m_mutex);
+  JsonArray placements;
+  for (auto const& p : m_compositeWorldPlacements) {
+    auto const& placement = p.second;
+    placements.append(JsonObject{
+      {"worldId", printWorldId(placement.worldId)},
+      {"offset", JsonArray{placement.offset[0], placement.offset[1]}}
+    });
+  }
+  return placements;
+}
+
+bool UniverseClient::compositeRenderingActive() const {
+  RecursiveMutexLocker locker(m_mutex);
+  return !m_compositeWorldPlacements.empty();
+}
+
+Vec2I UniverseClient::compositeWorldOffset(WorldId const& worldId) const {
+  RecursiveMutexLocker locker(m_mutex);
+  if (worldId) {
+    if (auto placement = m_compositeWorldPlacements.ptr(printWorldId(worldId)))
+      return placement->offset;
+  }
+  return {};
+}
+
+Maybe<Vec2U> UniverseClient::compositeWorldSize(WorldId const& worldId) {
+  if (!worldId)
+    return {};
+
+  WorldClientThreadPtr thread;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    if (m_clientContext && worldId == playerWorld()) {
+      if (m_worldClient && m_worldClient->inWorld())
+        return m_worldClient->geometry().size();
+      return {};
+    }
+
+    if (!m_subWorlds.hasRightValue(worldId))
+      return {};
+    auto id = m_subWorlds.getLeft(worldId);
+    if (!m_subWorldThreads.contains(id))
+      return {};
+    thread = m_subWorldThreads.get(id);
+  }
+
+  // Do not hold the universe mutex while acquiring the world-thread lock.
+  Maybe<Vec2U> size;
+  if (!thread->errorOccurred())
+    thread->executeAction([&](WorldClientThread*, WorldClient* world) {
+      if (world->inWorld())
+        size = world->geometry().size();
+    });
+  return size;
+}
+
+Maybe<String> UniverseClient::compositeRegionAtHeight(int virtualY) {
+  // This is a query about display regions, not a request to transfer a player.
+  List<CompositeWorldPlacement> placements;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    for (auto const& p : m_compositeWorldPlacements)
+      placements.append(p.second);
+  }
+
+  Maybe<String> region;
+  for (auto const& placement : placements) {
+    if (auto size = compositeWorldSize(placement.worldId)) {
+      if (placement.containsVirtualY(virtualY, size->y())) {
+        // Until explicit layer priorities are supported, overlapping regions
+        // must never arbitrarily select a gameplay authority.
+        if (region)
+          return {};
+        region = printWorldId(placement.worldId);
+      }
+    }
+  }
+  return region;
+}
+
+void UniverseClient::forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action) {
+  // Snapshot the references before locking any secondary WorldClient. Its
+  // update/scripts may themselves call back into the universe client; holding
+  // the universe mutex while entering the world lock would invert lock order.
+  List<pair<CompositeWorldPlacement, WorldClientThreadPtr>> worlds;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    if (!m_clientContext)
+      return;
+
+    WorldId primaryWorld = playerWorld();
+    for (auto const& p : m_compositeWorldPlacements) {
+      auto const& placement = p.second;
+      if (placement.worldId == primaryWorld || !m_subWorlds.hasRightValue(placement.worldId))
+        continue;
+      auto subWorldId = m_subWorlds.getLeft(placement.worldId);
+      if (m_subWorldThreads.contains(subWorldId)) {
+        auto thread = m_subWorldThreads.get(subWorldId);
+        if (!thread->errorOccurred())
+          worlds.append({placement, thread});
+      }
+    }
+  }
+
+  for (auto const& entry : worlds) {
+    entry.second->executeAction([&](WorldClientThread*, WorldClient* subWorld) {
+      if (subWorld->inWorld())
+        action(entry.first, subWorld);
+    });
+  }
 }
 
 RpcPromise<Json> UniverseClient::sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args) {
@@ -1129,6 +1276,7 @@ void UniverseClient::reset() {
   }
 
   m_subWorlds.clear();
+  m_compositeWorldPlacements.clear();
   m_subWorldThreads.clear();
   m_universeClock.reset();
   m_worldClient.reset();

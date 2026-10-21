@@ -163,6 +163,7 @@ SET (star_game_HEADERS
     StarWeatherTypes.hpp
     StarWireProcessor.hpp
     StarWiring.hpp
+    StarCompositeWorld.hpp
     StarWorldCamera.hpp
     StarWorldClient.hpp
     StarWorldClientThread.hpp

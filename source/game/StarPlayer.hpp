@@ -403,11 +403,20 @@ public:
   bool isDeployed() const;
 
   void setBusyState(PlayerBusyState busyState);
-  // The busy state most recently requested (by the interface), before any hidden indicators are applied.
+  // All the busy states the interface currently wants shown (a window can be open while the chat box has focus).
+  void setBusyStates(Set<PlayerBusyState> const& busyStates);
+  Set<PlayerBusyState> const& busyStates() const;
+  // The strongest of those (menu, then chatting), before any hidden indicators are applied.
   PlayerBusyState busyState() const;
   // Scripts can hide the indicator of a busy state. While hidden, requesting that state shows none instead.
   void setBusyIndicatorHidden(PlayerBusyState busyState, bool hidden);
   bool busyIndicatorHidden(PlayerBusyState busyState) const;
+
+  // What the party sees in place of this player's name and portrait. Not saved, set by scripts.
+  Maybe<String> const& teamName() const;
+  void setTeamName(Maybe<String> name);
+  Maybe<List<Drawable>> const& teamPortrait() const;
+  void setTeamPortrait(Maybe<List<Drawable>> portrait);
 
   // A hard move to a specified location
   void moveTo(Vec2F const& footPosition);
@@ -602,8 +611,12 @@ private:
 
   String m_teleportAnimationType;
   NetworkedAnimatorPtr m_effectsAnimator;
+  void updateBusyIndicator();
   PlayerBusyState m_busyState = PlayerBusyState::None;
+  Set<PlayerBusyState> m_busyStates;
   Set<PlayerBusyState> m_hiddenBusyIndicators;
+  Maybe<String> m_teamName;
+  Maybe<List<Drawable>> m_teamPortrait;
   NetworkedAnimator::DynamicTarget m_effectsAnimatorDynamicTarget;
 
   float m_emoteCooldown;

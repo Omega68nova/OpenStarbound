@@ -131,7 +131,7 @@ MainInterface::MainInterface(UniverseClientPtr client, WorldPainterPtr painter, 
 
   initHttpTrustDialog();
 
-  m_joinRequestDialog = make_shared<JoinRequestDialog>();
+  m_joinRequestDialog = make_shared<JoinRequestDialog>(m_client);
   m_paneManager.registerPane(MainInterfacePanes::JoinRequest, PaneLayer::ModalWindow, m_joinRequestDialog);
 
   m_actionBar = make_shared<ActionBar>(&m_paneManager, m_client->mainPlayer());
@@ -541,12 +541,12 @@ void MainInterface::preUpdate(float) {
   if (!m_client->paused())
     player->aim(cursorWorldPosition());
 
+  Set<PlayerBusyState> busyStates;
   if (m_paneManager.topPane({PaneLayer::Window, PaneLayer::ModalWindow}))
-    player->setBusyState(PlayerBusyState::Menu);
-  else if (m_chat->hasFocus())
-    player->setBusyState(PlayerBusyState::Chatting);
-  else
-    player->setBusyState(PlayerBusyState::None);
+    busyStates.add(PlayerBusyState::Menu);
+  if (m_chat->hasFocus())
+    busyStates.add(PlayerBusyState::Chatting);
+  player->setBusyStates(busyStates);
 }
 
 void MainInterface::update(float dt) {

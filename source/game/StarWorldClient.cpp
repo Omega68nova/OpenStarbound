@@ -122,6 +122,17 @@ WorldClient::WorldClient(ClientSubWorldId subWorldId, UniverseClient* universe) 
   m_expiryTimer = GameTimer(m_clientConfig.getFloat("idleSubWorldExpireTime"));
   
   m_headless = true;
+  // Subworlds are headless by default, but opt-in composite rendering needs
+  // the same well-defined rendering state as a main WorldClient.
+  m_fullBright = false;
+  m_asyncLighting = false;
+  m_stopLightingThread = false;
+  m_pendingLightReady = false;
+  m_worldDimTimer = GameTimer(m_clientConfig.getFloat("worldDimTime"));
+  m_worldDimTimer.setDone();
+  m_worldDimLevel = 0.0f;
+  m_parallaxFadeTimer = GameTimer(m_clientConfig.getFloat("parallaxFadeTime"));
+  m_parallaxFadeTimer.setDone();
 
   m_currentStep = 0;
   m_currentTime = 0;
@@ -526,6 +537,21 @@ void WorldClient::centerClientWindowOnPlayer() {
   centerClientWindowOnPlayer(Vec2U(clientWindow().size()));
 }
 
+void WorldClient::setCompositeRenderWindow(RectI window) {
+  if (m_headless) {
+    m_compositeRenderEnabled = true;
+    setClientWindow(window);
+    m_expiryTimer.reset();
+  }
+}
+
+void WorldClient::disableCompositeRendering() {
+  if (m_headless) {
+    m_compositeRenderEnabled = false;
+    setClientWindow(RectI());
+  }
+}
+
 RectI WorldClient::clientWindow() const {
   return m_clientState.window();
 }
@@ -535,7 +561,7 @@ WorldClientState& WorldClient::clientState() {
 }
 
 void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
-  if (m_headless)
+  if (m_headless && !m_compositeRenderEnabled)
     return;
   
   if (!m_lightingThread && m_asyncLighting)
@@ -599,11 +625,11 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
   float pulseRate = Root::singleton().assets()->json("/highlights.config:interactivePulseRate").toFloat();
   float pulseLevel = 1 - pulseAmount * 0.5 * (sin(2 * Constants::pi * pulseRate * Time::monotonicMilliseconds() / 1000.0) + 1);
 
-  bool inspecting = m_mainPlayer->inspecting();
+  bool inspecting = m_mainPlayer && m_mainPlayer->inspecting();
   float inspectionFlickerMultiplier = Random::randf(1 - Root::singleton().assets()->json("/highlights.config:inspectionFlickerAmount").toFloat(), 1);
 
   EntityId playerAimInteractive = NullEntityId;
-  if (Root::singleton().configuration()->get("interactiveHighlight").toBool()) {
+  if (m_mainPlayer && Root::singleton().configuration()->get("interactiveHighlight").toBool()) {
     if (auto entity = m_mainPlayer->bestInteractionEntity(false))
       playerAimInteractive = entity->entityId();
   }
@@ -662,7 +688,7 @@ void WorldClient::render(WorldRenderData& renderData, unsigned bufferTiles) {
             ed.highlightEffect.level = pulseLevel;
           }
         }
-      } else if (inspecting) {
+      } else if (inspecting && m_mainPlayer) {
         if (auto inspectable = as<InspectableEntity>(entity)) {
           ed.highlightEffect = m_mainPlayer->inspectionHighlight(inspectable);
           ed.highlightEffect.level *= inspectionFlickerMultiplier;
@@ -1439,7 +1465,7 @@ void WorldClient::update(float dt) {
     });
   
   if (m_headless) {
-    if (m_entityMap->size() > 0) {
+    if (m_compositeRenderEnabled || m_entityMap->size() > 0) {
       m_expiryTimer.reset();
     } else if (m_expiryTimer.ready()) {
       // world has had no entities and isn't being used, destroy it
@@ -1448,8 +1474,9 @@ void WorldClient::update(float dt) {
   }
 
   RectI particleRegion;
-  if (!m_headless) {
-    m_clientState.setPlayer(m_mainPlayer->entityId());
+  if (!m_headless || m_compositeRenderEnabled) {
+    if (!m_headless)
+      m_clientState.setPlayer(m_mainPlayer->entityId());
     
     m_sky->setAltitude(m_clientState.windowCenter()[1]);
     

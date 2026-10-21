@@ -377,19 +377,28 @@ Image DirectivesGroup::applyNewImage(Image const& image, ImageReferenceCallback 
 
 void DirectivesGroup::applyExistingImage(Image& image, ImageReferenceCallback refCallback) const {
   bool first = true;
+  // The operations are collected and applied together, which lets processImageOperationList apply them in a cheaper order where that
+  // gives the same image.
+  // An operation that can't be applied ends the list.
+  List<ImageOperation const*> operations;
+
   forEach([&](Directives::Entry const& entry, Directives const& directives) {
     ImageOperation const& operation = entry.loadOperation(*directives);
-    if (auto error = operation.ptr<ErrorImageOperation>())
+    if (auto error = operation.ptr<ErrorImageOperation>()) {
+      processImageOperationList(operations, image, refCallback);
       if (auto string = error->cause.ptr<std::string>())
         throw DirectivesException::format("ImageOperation parse error: {}", *string);
       else
         std::rethrow_exception(error->cause.get<std::exception_ptr>());
-    else if (!first && entry.begin != 0 && operation.is<NullImageOperation>())
+    } else if (!first && entry.begin != 0 && operation.is<NullImageOperation>()) {
+      processImageOperationList(operations, image, refCallback);
       throw DirectivesException::format("Invalid image operation: {}", entry.string(*directives));
-    else
-      processImageOperation(operation, image, refCallback);
+    } else {
+      operations.append(&operation);
+    }
     first = false;
   });
+  processImageOperationList(operations, image, refCallback);
 }
 
 size_t DirectivesGroup::hash() const {

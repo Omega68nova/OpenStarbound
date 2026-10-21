@@ -6,6 +6,7 @@
 #include "StarCelestialParameters.hpp"
 #include "StarChatTypes.hpp"
 #include "StarWarping.hpp"
+#include "StarCompositeWorld.hpp"
 #include "StarAiTypes.hpp"
 #include "StarSky.hpp"
 #include "StarUniverseConnection.hpp"
@@ -131,6 +132,19 @@ public:
   ClientSubWorldId getSubWorldOnWorld(WorldId worldId);
   void destroySubWorldOnWorld(WorldId worldId);
 
+  // Mod-controlled virtual placements; no world data is copied or modified.
+  void setCompositeWorldPlacement(WorldId const& worldId, Vec2I const& offset);
+  void clearCompositeWorldPlacement(WorldId const& worldId);
+  JsonArray compositeWorldPlacements() const;
+  bool compositeRenderingActive() const;
+  Vec2I compositeWorldOffset(WorldId const& worldId) const;
+  // Empty until the requested world has actually finished opening.
+  Maybe<Vec2U> compositeWorldSize(WorldId const& worldId);
+  // Returns empty if no world or multiple overlapping worlds occupy this Y.
+  Maybe<String> compositeRegionAtHeight(int virtualY);
+  // Access matching subworlds under their update-thread locks for rendering.
+  void forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action);
+
   RpcPromise<Json> sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
   RpcPromise<Json> sendMainWorldMessage(String const& message, JsonArray const& args = {});
 
@@ -196,6 +210,7 @@ private:
   StringMap<ScriptComponentPtr> m_scriptContexts;
   
   BiMap<ClientSubWorldId, WorldId> m_subWorlds;
+  StringMap<CompositeWorldPlacement> m_compositeWorldPlacements;
   IdMap<ClientSubWorldId,WorldClientThreadPtr> m_subWorldThreads;
 
   ReloadPlayerCallback m_playerReloadPreCallback;

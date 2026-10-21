@@ -103,6 +103,11 @@ LuaCallbacks LuaBindings::makeUniverseClientThreadCallbacks(UniverseClient* univ
 LuaCallbacks LuaBindings::makeUniverseClientCallbacks(UniverseClient* universe) {
   LuaCallbacks callbacks = makeUniverseClientThreadCallbacks(universe);
   
+  // Generic main-world introspection for client-side composition mods.
+  callbacks.registerCallback("playerWorldId", [universe]() -> String {
+    return printWorldId(universe->playerWorld());
+  });
+
   callbacks.registerCallback("subWorldActive", [universe](String const& worldId) -> bool {
     return universe->subWorldExistsOnWorld(parseWorldId(worldId));
   });
@@ -115,6 +120,28 @@ LuaCallbacks LuaBindings::makeUniverseClientCallbacks(UniverseClient* universe) 
     universe->destroySubWorldOnWorld(parseWorldId(worldId));
   });
   
+  // Client-only, declarative virtual-world layout API. Mods manage which
+  // subworlds are loaded; the compositor will consume these placements.
+  callbacks.registerCallback("setCompositeWorldPlacement", [universe](String const& worldId, Vec2I offset) {
+    universe->setCompositeWorldPlacement(parseWorldId(worldId), offset);
+  });
+
+  callbacks.registerCallback("clearCompositeWorldPlacement", [universe](String const& worldId) {
+    universe->clearCompositeWorldPlacement(parseWorldId(worldId));
+  });
+
+  callbacks.registerCallback("compositeWorldPlacements", [universe]() -> JsonArray {
+    return universe->compositeWorldPlacements();
+  });
+
+  callbacks.registerCallback("compositeWorldSize", [universe](String const& worldId) -> Maybe<Vec2U> {
+    return universe->compositeWorldSize(parseWorldId(worldId));
+  });
+
+  callbacks.registerCallback("compositeRegionAtHeight", [universe](int virtualY) -> Maybe<String> {
+    return universe->compositeRegionAtHeight(virtualY);
+  });
+
   callbacks.registerCallback("sendSubWorldMessage", [universe](String const& worldId, String const& message, LuaVariadic<Json> args) -> RpcPromise<Json> {
     return universe->sendSubWorldOnWorldMessage(parseWorldId(worldId), message, JsonArray::from(std::move(args)));
   });

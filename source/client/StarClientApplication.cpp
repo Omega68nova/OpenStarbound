@@ -293,6 +293,8 @@ void ClientApplication::renderInit(RendererPtr renderer) {
     m_titleScreen->renderInit(renderer);
   if (m_worldPainter)
     m_worldPainter->renderInit(renderer);
+  for (auto const& painter : m_compositeWorldPainters)
+    painter.second->renderInit(renderer);
 
   #ifdef STAR_ENABLE_STEAM_INTEGRATION
   #ifdef STAR_SYSTEM_LINUX
@@ -469,6 +471,79 @@ void ClientApplication::render() {
         return worldClient->waitForLighting(&m_renderData);
       });
       LogMap::set("client_render_world_painter", strf(u8"{:05d}\u00b5s", Time::monotonicMicroseconds() - paintStart));
+
+      // The source worlds keep their own simulations and render data. Compose
+      // secondary worlds only in their registered virtual vertical bands.
+      // Drawing after the primary world preserves its scene everywhere else.
+      if (m_universeClient->compositeRenderingActive()) {
+        WorldCamera mainCamera = m_worldPainter->camera();
+        Vec2I mainOffset = m_universeClient->compositeWorldOffset(m_universeClient->playerWorld());
+        int screenHeight = (int)renderer->screenSize()[1];
+        int screenWidth = (int)renderer->screenSize()[0];
+        float pixelsPerTile = TilePixels * mainCamera.pixelRatio();
+        m_universeClient->forEachCompositeSubWorld([&](CompositeWorldPlacement const& placement, WorldClient* subWorld) {
+          Vec2I delta = placement.offset - mainOffset;
+          float bottom = (delta[1] - mainCamera.centerWorldPosition()[1]) * pixelsPerTile + screenHeight * 0.5f;
+          float top = bottom + subWorld->geometry().height() * pixelsPerTile;
+          int yMin = clamp((int)floor(bottom), 0, screenHeight);
+          int yMax = clamp((int)ceil(top), 0, screenHeight);
+          if (yMax <= yMin) {
+            // Keep the world subscription alive without streaming offscreen tiles.
+            // The mod controls actual detach / unloading independently.
+            subWorld->setCompositeRenderWindow(RectI());
+            return;
+          }
+
+          WorldCamera subCamera = mainCamera;
+          subCamera.setVerticalClamping(false);
+          subCamera.setWorldGeometry(subWorld->geometry());
+          subCamera.setCenterWorldPosition(mainCamera.centerWorldPosition() - Vec2F(delta), true);
+          // Subscribe only to tiles that actually exist in the secondary
+          // world's Y range, even when the camera straddles the seam.
+          RectI sourceWindow = subCamera.worldTileRect();
+          int tileBottom = std::max(0, sourceWindow.yMin());
+          int tileTop = std::min((int)subWorld->geometry().height(), sourceWindow.yMax());
+          if (tileTop <= tileBottom) {
+            subWorld->setCompositeRenderWindow(RectI());
+            return;
+          }
+          subWorld->setCompositeRenderWindow(RectI(sourceWindow.xMin(), tileBottom, sourceWindow.xMax(), tileTop));
+          subWorld->render(m_compositeRenderData, TilePainter::BorderTileSize);
+          String worldKey = printWorldId(placement.worldId);
+          if (!m_compositeWorldPainters.contains(worldKey)) {
+            auto painter = make_shared<WorldPainter>();
+            painter->renderInit(renderer);
+            m_compositeWorldPainters.set(worldKey, painter);
+          }
+          auto painter = m_compositeWorldPainters.get(worldKey);
+          painter->camera() = subCamera;
+
+          // The original planet world includes its own entire space layer.
+          // Nothing is cropped from its data: only this pass is clipped to
+          // the world\u0027s translated vertical extent on the screen.
+          renderer->setScissorRect(RectI(0, yMin, screenWidth, yMax));
+          try {
+            painter->render(m_compositeRenderData, [&]() -> bool {
+              return subWorld->waitForLighting(&m_compositeRenderData);
+            });
+          } catch (...) {
+            renderer->setScissorRect({});
+            throw;
+          }
+          renderer->setScissorRect({});
+        });
+      }
+      // Release rendering resources for worlds that scripts have detached.
+      StringSet registeredWorlds;
+      for (auto const& entry : m_universeClient->compositeWorldPlacements())
+        registeredWorlds.add(entry.getString("worldId"));
+      List<String> detachedPainterIds;
+      for (auto const& painter : m_compositeWorldPainters) {
+        if (!registeredWorlds.contains(painter.first))
+          detachedPainterIds.append(painter.first);
+      }
+      for (auto const& worldKey : detachedPainterIds)
+        m_compositeWorldPainters.remove(worldKey);
       LogMap::set("client_render_world_total", strf(u8"{:05d}\u00b5s", Time::monotonicMicroseconds() - totalStart));
       
       auto size = Vec2F(renderer->screenSize());
@@ -620,6 +695,8 @@ void ClientApplication::changeState(MainAppState newState) {
   }
 
   if (oldState > MainAppState::Title && m_state <= MainAppState::Title) {
+    // Per-world terrain/sky caches must not survive a server or player switch.
+    m_compositeWorldPainters.clear();
     if (m_universeClient)
       m_universeClient->disconnect();
 
@@ -845,6 +922,8 @@ void ClientApplication::changeState(MainAppState newState) {
 
     if (auto renderer = Application::renderer()) {
       m_worldPainter->renderInit(renderer);
+      for (auto const& painter : m_compositeWorldPainters)
+        painter.second->renderInit(renderer);
     }
   }
 }
@@ -1350,6 +1429,7 @@ void ClientApplication::updateCamera(float dt) {
     return;
 
   WorldCamera& camera = m_worldPainter->camera();
+  camera.setVerticalClamping(!m_universeClient->compositeRenderingActive());
   camera.update(dt);
 
   if (m_mainInterface->fixedCamera())

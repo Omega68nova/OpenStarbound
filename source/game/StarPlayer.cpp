@@ -1169,7 +1169,7 @@ void Player::update(float dt, uint64_t) {
         setSecretProperty("humanoid.headRotation", headRotation);
     }
   }
-  
+
   if (isMaster()) {
     for (auto& p : m_genericScriptContexts)
       p.second->invoke("postUpdate");
@@ -1241,7 +1241,7 @@ void Player::render(RenderCallback* renderCallback) {
   }
 
   auto loungeAnchor = as<LoungeAnchor>(m_movementController->entityAnchor());
-  
+
   EntityRenderLayer renderLayer = RenderLayerPlayer;
   if (auto overrideRenderLayer = getSecretProperty("overrideRenderLayer"); overrideRenderLayer.canConvert(Json::Type::Int)) {
     renderLayer = overrideRenderLayer.toUInt();
@@ -2160,13 +2160,39 @@ bool Player::isDeployed() const {
 }
 
 void Player::setBusyState(PlayerBusyState busyState) {
-  m_busyState = busyState;
-  bool hidden = m_hiddenBusyIndicators.contains(busyState);
-  m_effectsAnimator->setState("busy", PlayerBusyStateNames.getRight(hidden ? PlayerBusyState::None : busyState));
+  Set<PlayerBusyState> busyStates;
+  if (busyState != PlayerBusyState::None)
+    busyStates.add(busyState);
+  setBusyStates(busyStates);
+}
+
+void Player::setBusyStates(Set<PlayerBusyState> const& busyStates) {
+  m_busyStates = busyStates;
+  updateBusyIndicator();
 }
 
 PlayerBusyState Player::busyState() const {
   return m_busyState;
+}
+
+Set<PlayerBusyState> const& Player::busyStates() const {
+  return m_busyStates;
+}
+
+void Player::updateBusyIndicator() {
+  m_busyState = PlayerBusyState::None;
+  PlayerBusyState shown = PlayerBusyState::None;
+  for (auto state : {PlayerBusyState::Menu, PlayerBusyState::Chatting}) {
+    if (!m_busyStates.contains(state))
+      continue;
+    if (m_busyState == PlayerBusyState::None)
+      m_busyState = state;
+    if (!m_hiddenBusyIndicators.contains(state)) {
+      shown = state;
+      break;
+    }
+  }
+  m_effectsAnimator->setState("busy", PlayerBusyStateNames.getRight(shown));
 }
 
 void Player::setBusyIndicatorHidden(PlayerBusyState busyState, bool hidden) {
@@ -2174,11 +2200,33 @@ void Player::setBusyIndicatorHidden(PlayerBusyState busyState, bool hidden) {
     m_hiddenBusyIndicators.add(busyState);
   else
     m_hiddenBusyIndicators.remove(busyState);
-  setBusyState(m_busyState); // apply right away
+  updateBusyIndicator(); // apply right away
 }
 
 bool Player::busyIndicatorHidden(PlayerBusyState busyState) const {
   return m_hiddenBusyIndicators.contains(busyState);
+}
+
+Maybe<String> const& Player::teamName() const {
+  return m_teamName;
+}
+
+void Player::setTeamName(Maybe<String> name) {
+  if (name && name->empty())
+    name.reset();
+  else if (name)
+    name = name->slice(0, 64); // by characters, so a multi-byte one is never cut
+  m_teamName = std::move(name);
+}
+
+Maybe<List<Drawable>> const& Player::teamPortrait() const {
+  return m_teamPortrait;
+}
+
+void Player::setTeamPortrait(Maybe<List<Drawable>> portrait) {
+  if (portrait && portrait->size() > 32)
+    throw StarException("A team portrait can have at most 32 drawables");
+  m_teamPortrait = std::move(portrait);
 }
 
 void Player::teleportOut(String const& animationType, bool deploy) {

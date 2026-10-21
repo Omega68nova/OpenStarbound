@@ -163,6 +163,10 @@ public:
   void centerClientWindowOnPlayer(Vec2U const& windowSize);
   void centerClientWindowOnPlayer();
   RectI clientWindow() const;
+  // Enables visual rendering for an otherwise headless secondary world.
+  // Does not give it a main player or alter server-side world ownership.
+  void setCompositeRenderWindow(RectI window);
+  void disableCompositeRendering();
   WorldClientState& clientState();
 
   Maybe<ChainableJsonMessageResponse> receiveMessage(ConnectionId fromConnection, String const& message, JsonArray const& args);
@@ -329,7 +333,7 @@ private:
 
   PlayerPtr m_mainPlayer;
 
-  bool m_collisionDebug;
+  bool m_collisionDebug = false;
 
   // Client side entity updates are not done until m_inWorld is true, which is
   // set to true after we have entered a world *and* the first batch of updates
@@ -337,6 +341,7 @@ private:
   bool m_inWorld;
   
   bool m_headless;
+  bool m_compositeRenderEnabled = false;
   
   ClientSubWorldId m_subWorldId;
   bool m_requestedDestroy;
@@ -345,7 +350,7 @@ private:
   float m_worldDimLevel;
   Vec3B m_worldDimColor;
 
-  bool m_interactiveHighlightMode;
+  bool m_interactiveHighlightMode = false;
 
   GameTimer m_parallaxFadeTimer;
   ParallaxPtr m_currentParallax;
