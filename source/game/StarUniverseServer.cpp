@@ -2005,9 +2005,27 @@ void UniverseServer::packetsReceived(UniverseConnectionServer*, ConnectionId cli
           } else if (auto customWorldId = cwtRequest->worldId.ptr<ClientCustomWorldId>()) {
             ownWorld = customWorldId->uuid == clientContext->playerUuid();
           }
+          // Optional, narrowly scoped access for composite-world mods. This
+          // does not grant access to arbitrary planets or other ships.
+          // The existing disallowClientSubWorlds setting still overrides it.
+          bool currentOrbitWorld = false;
+          if (configuration->get("allowClientSubWorldsCurrentOrbit").optBool().value(false)) {
+            if (auto shipId = clientContext->playerWorldId().ptr<ClientShipWorldId>()) {
+              if (*shipId == clientContext->playerUuid()) {
+                if (auto requestedBody = cwtRequest->worldId.ptr<CelestialWorldId>()) {
+                  auto location = clientContext->shipLocation();
+                  if (auto coordinate = location.maybe<CelestialCoordinate>())
+                    currentOrbitWorld = *requestedBody == CelestialWorldId(*coordinate);
+                  else if (auto orbit = location.maybe<CelestialOrbit>())
+                    currentOrbitWorld = *requestedBody == CelestialWorldId(orbit->target);
+                }
+              }
+            }
+          }
           if (
             configuration->get("disallowClientSubWorlds").optBool().value(false)
             || !(ownWorld
+              || currentOrbitWorld
               || configuration->get("allowClientSubWorldsAllWorlds").optBool().value(true)
               || clientContext->isAdmin()
               || (cwtRequest->worldId == clientContext->playerWorldId() && configuration->get("allowClientSubWorldsCurrentWorld").optBool().value(true)))
