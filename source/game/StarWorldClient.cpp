@@ -122,6 +122,17 @@ WorldClient::WorldClient(ClientSubWorldId subWorldId, UniverseClient* universe) 
   m_expiryTimer = GameTimer(m_clientConfig.getFloat("idleSubWorldExpireTime"));
   
   m_headless = true;
+  // Subworlds are headless by default, but opt-in composite rendering needs
+  // the same well-defined rendering state as a main WorldClient.
+  m_fullBright = false;
+  m_asyncLighting = false;
+  m_stopLightingThread = false;
+  m_pendingLightReady = false;
+  m_worldDimTimer = GameTimer(m_clientConfig.getFloat("worldDimTime"));
+  m_worldDimTimer.setDone();
+  m_worldDimLevel = 0.0f;
+  m_parallaxFadeTimer = GameTimer(m_clientConfig.getFloat("parallaxFadeTime"));
+  m_parallaxFadeTimer.setDone();
 
   m_currentStep = 0;
   m_currentTime = 0;
