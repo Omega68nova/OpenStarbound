@@ -6,6 +6,7 @@
 #include "StarCelestialParameters.hpp"
 #include "StarChatTypes.hpp"
 #include "StarWarping.hpp"
+#include "StarCompositeWorld.hpp"
 #include "StarAiTypes.hpp"
 #include "StarSky.hpp"
 #include "StarUniverseConnection.hpp"
@@ -131,6 +132,11 @@ public:
   ClientSubWorldId getSubWorldOnWorld(WorldId worldId);
   void destroySubWorldOnWorld(WorldId worldId);
 
+  // Mod-controlled virtual placements; no world data is copied or modified.
+  void setCompositeWorldPlacement(WorldId const& worldId, Vec2I const& offset);
+  void clearCompositeWorldPlacement(WorldId const& worldId);
+  JsonArray compositeWorldPlacements() const;
+
   RpcPromise<Json> sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
   RpcPromise<Json> sendMainWorldMessage(String const& message, JsonArray const& args = {});
 
@@ -196,6 +202,7 @@ private:
   StringMap<ScriptComponentPtr> m_scriptContexts;
   
   BiMap<ClientSubWorldId, WorldId> m_subWorlds;
+  StringMap<CompositeWorldPlacement> m_compositeWorldPlacements;
   IdMap<ClientSubWorldId,WorldClientThreadPtr> m_subWorldThreads;
 
   ReloadPlayerCallback m_playerReloadPreCallback;
