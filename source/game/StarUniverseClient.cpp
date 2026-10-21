@@ -895,6 +895,35 @@ void UniverseClient::destroySubWorldOnWorld(WorldId worldId) {
   setSubWorldWorld(m_subWorlds.getLeft(worldId), WorldId());
 }
 
+void UniverseClient::setCompositeWorldPlacement(WorldId const& worldId, Vec2I const& offset) {
+  if (!worldId)
+    throw StarException("Cannot place an empty world in a composite view");
+
+  // Declarative placement only. Scripts control subworld subscriptions and
+  // lifetime separately through loadSubWorld / unloadSubWorld.
+  RecursiveMutexLocker locker(m_mutex);
+  m_compositeWorldPlacements.set(printWorldId(worldId), CompositeWorldPlacement{worldId, offset});
+}
+
+void UniverseClient::clearCompositeWorldPlacement(WorldId const& worldId) {
+  RecursiveMutexLocker locker(m_mutex);
+  if (worldId)
+    m_compositeWorldPlacements.remove(printWorldId(worldId));
+}
+
+JsonArray UniverseClient::compositeWorldPlacements() const {
+  RecursiveMutexLocker locker(m_mutex);
+  JsonArray placements;
+  for (auto const& p : m_compositeWorldPlacements) {
+    auto const& placement = p.second;
+    placements.append(JsonObject{
+      {"worldId", printWorldId(placement.worldId)},
+      {"offset", JsonArray{placement.offset[0], placement.offset[1]}}
+    });
+  }
+  return placements;
+}
+
 RpcPromise<Json> UniverseClient::sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args) {
   if (m_connection->packetSocket().netRules().version() < 16) {
     return RpcPromise<Json>::createFailed("Server too old");
@@ -1129,6 +1158,7 @@ void UniverseClient::reset() {
   }
 
   m_subWorlds.clear();
+  m_compositeWorldPlacements.clear();
   m_subWorldThreads.clear();
   m_universeClock.reset();
   m_worldClient.reset();
