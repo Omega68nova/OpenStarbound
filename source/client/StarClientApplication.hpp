@@ -118,6 +118,9 @@ private:
   PlayerPtr m_player;
   WorldPainterPtr m_worldPainter;
   WorldRenderData m_renderData;
+  // Secondary render pass with independent parallax/tile caches.
+  WorldPainterPtr m_compositeWorldPainter;
+  WorldRenderData m_compositeRenderData;
   MainInterfacePtr m_mainInterface;
   
   StringMap<PostProcessGroup> m_postProcessGroups;
