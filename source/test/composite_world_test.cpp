@@ -46,3 +46,24 @@ TEST(CompositeWorldCameraTest, CompositeViewCanLookOutsideSourceWorld) {
   camera.setVerticalClamping(true);
   EXPECT_LE(camera.centerWorldPosition().y(), 500.0f);
 }
+
+TEST(CompositeWorldPlacementTest, RegionContainsOriginalPlanetSpaceAndExcludesAdjacentShip) {
+  CompositeWorldPlacement planet{WorldId(), Vec2I(0, 0)};
+  CompositeWorldPlacement ship{WorldId(), Vec2I(0, 3128)};
+
+  EXPECT_TRUE(planet.containsVirtualY(2999, 3000));
+  EXPECT_FALSE(planet.containsVirtualY(3000, 3000));
+  EXPECT_FALSE(ship.containsVirtualY(3127, 250));
+  EXPECT_TRUE(ship.containsVirtualY(3128, 250));
+  EXPECT_TRUE(ship.containsVirtualY(3377, 250));
+  EXPECT_FALSE(ship.containsVirtualY(3378, 250));
+}
+
+TEST(CompositeWorldPlacementTest, NegativeVirtualOffsetsAndZeroHeight) {
+  CompositeWorldPlacement world{WorldId(), Vec2I(-100, -40)};
+  EXPECT_FALSE(world.containsVirtualY(-41, 30));
+  EXPECT_TRUE(world.containsVirtualY(-40, 30));
+  EXPECT_TRUE(world.containsVirtualY(-11, 30));
+  EXPECT_FALSE(world.containsVirtualY(-10, 30));
+  EXPECT_FALSE(world.containsVirtualY(-40, 0));
+}
