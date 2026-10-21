@@ -333,7 +333,7 @@ private:
 
   PlayerPtr m_mainPlayer;
 
-  bool m_collisionDebug;
+  bool m_collisionDebug = false;
 
   // Client side entity updates are not done until m_inWorld is true, which is
   // set to true after we have entered a world *and* the first batch of updates
@@ -350,7 +350,7 @@ private:
   float m_worldDimLevel;
   Vec3B m_worldDimColor;
 
-  bool m_interactiveHighlightMode;
+  bool m_interactiveHighlightMode = false;
 
   GameTimer m_parallaxFadeTimer;
   ParallaxPtr m_currentParallax;
