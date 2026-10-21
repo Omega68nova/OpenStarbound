@@ -138,6 +138,8 @@ public:
   JsonArray compositeWorldPlacements() const;
   bool compositeRenderingActive() const;
   Vec2I compositeWorldOffset(WorldId const& worldId) const;
+  // Empty until the requested world has actually finished opening.
+  Maybe<Vec2U> compositeWorldSize(WorldId const& worldId);
   // Access matching subworlds under their update-thread locks for rendering.
   void forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action);
 
