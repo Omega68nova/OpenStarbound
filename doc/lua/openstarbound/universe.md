@@ -317,6 +317,17 @@ planet size.
 
 ---
 
+#### `String?` universe.compositeRegionAtHeight(`int` virtualY)
+
+Returns the world ID for the one **loaded, registered** composite world
+whose entire native vertical extent contains `virtualY`. Returns `nil`
+outside all regions, while loading, or if several regions overlap. The upper
+bound is exclusive. This is a **read-only rendering-region lookup** and does
+not move the player, change server authority, or imply that gameplay physics
+cross the seam.
+
+---
+
 #### `Json[]` universe.compositeWorldPlacements()
 
 Returns the registered placements as objects with `worldId` and integer
