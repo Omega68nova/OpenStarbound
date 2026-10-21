@@ -134,6 +134,10 @@ LuaCallbacks LuaBindings::makeUniverseClientCallbacks(UniverseClient* universe) 
     return universe->compositeWorldPlacements();
   });
 
+  callbacks.registerCallback("compositeWorldSize", [universe](String const& worldId) -> Maybe<Vec2U> {
+    return universe->compositeWorldSize(parseWorldId(worldId));
+  });
+
   callbacks.registerCallback("sendSubWorldMessage", [universe](String const& worldId, String const& message, LuaVariadic<Json> args) -> RpcPromise<Json> {
     return universe->sendSubWorldOnWorldMessage(parseWorldId(worldId), message, JsonArray::from(std::move(args)));
   });
