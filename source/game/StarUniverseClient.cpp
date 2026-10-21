@@ -986,6 +986,30 @@ Maybe<Vec2U> UniverseClient::compositeWorldSize(WorldId const& worldId) {
   return size;
 }
 
+Maybe<String> UniverseClient::compositeRegionAtHeight(int virtualY) {
+  // This is a query about display regions, not a request to transfer a player.
+  List<CompositeWorldPlacement> placements;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    for (auto const& p : m_compositeWorldPlacements)
+      placements.append(p.second);
+  }
+
+  Maybe<String> region;
+  for (auto const& placement : placements) {
+    if (auto size = compositeWorldSize(placement.worldId)) {
+      if (placement.containsVirtualY(virtualY, size->y())) {
+        // Until explicit layer priorities are supported, overlapping regions
+        // must never arbitrarily select a gameplay authority.
+        if (region)
+          return {};
+        region = printWorldId(placement.worldId);
+      }
+    }
+  }
+  return region;
+}
+
 void UniverseClient::forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action) {
   // Snapshot the references before locking any secondary WorldClient. Its
   // update/scripts may themselves call back into the universe client; holding
