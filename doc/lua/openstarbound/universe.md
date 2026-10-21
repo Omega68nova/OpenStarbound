@@ -248,11 +248,16 @@ Returns if a subworld is currently active or requested on the given world.
 #### `void` universe.loadSubWorld(`String` worldId)
 
 Loads the given world as a subworld if it is not loaded.
-Subworlds are client worlds that are considered headless. 
-They do not render, they do not have a main player, and they do not have a screen.
+Subworlds are client worlds that are considered headless.
+By default they do not render, and they never own the main player or screen.
+A subworld explicitly registered with the experimental composite renderer may
+supply render data and a subscribed client tile window, but remains headless
+for gameplay and networking.
 World script contexts are required to do anything with them.
 `clientPresenceMaster` entities are required to load anything in them.
-They automatically unload after a few seconds of no activity. (No entities, no incoming messages.)
+They automatically unload after a few seconds of no activity (no entities or incoming messages),
+unless actively held for composite rendering. A registered composition placement
+is separate from the SubWorld subscription.
 
 They function independently of the client main world, persisting even if the player warps elsewhere. 
 Subworld master entities are considered different master to client main world entities.
@@ -262,6 +267,8 @@ Subworld master entities are considered different master to client main world en
 #### `void` universe.unloadSubWorld(`String` worldId)
 
 If a subworld is active on the given world, unloads it.
+The client also clears any matching composite placement and releases its
+secondary render window. Unloading never deletes the persistent world.
 
 ---
 
@@ -290,9 +297,23 @@ handoffs and cross-world collisions are not yet implemented.
 #### `void` universe.clearCompositeWorldPlacement(`String` worldId)
 
 Removes a virtual placement without unloading or modifying the corresponding
-world. To release a secondary-world subscription, the mod can separately call
-`unloadSubWorld` when it is safe to do so (for example, when out of frame).
+world. This also releases its secondary-world rendering keepalive, but does
+not itself unload the SubWorld subscription. Call `unloadSubWorld` after it is
+safe (for example, when the region is out of frame).
 Placements are cleared when the universe client disconnects or resets.
+
+---
+
+#### `Vec2U?` universe.compositeWorldSize(`String` worldId)
+
+Returns the actual width and height of an initialized primary or secondary
+WorldClient, or `nil` until that world is loaded. Unlike
+`subWorldActive(worldId)`, this distinguishes a pending request from a
+ready-to-render world. It is read-only and does not request an additional world.
+
+Use its height to position another world above the planet's **entire**
+existing upper atmosphere and space layer rather than assuming a fixed
+planet size.
 
 ---
 
