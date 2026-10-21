@@ -2,11 +2,12 @@
 
 #include "StarWorldClient.hpp"
 #include "StarThread.hpp"
-#include "StarRpcThreadPromise.hpp"
+#include "StarRpcPromise.hpp"
 
 namespace Star {
 
 STAR_CLASS(WorldClientThread);
+STAR_CLASS(UniverseClient);
 
 // Runs a WorldThreadedClient in a separate thread.
 class WorldClientThread : public Thread {
@@ -14,12 +15,12 @@ public:
   struct Message {
     String message;
     JsonArray args;
-    RpcThreadPromiseKeeper<Json> promise;
+    RpcPromiseKeeper<Json> promise;
   };
 
   typedef function<void(WorldClientThread*, WorldClient*)> WorldClientAction;
 
-  WorldClientThread(ClientSubWorldId subWorldId);
+  WorldClientThread(ClientSubWorldId subWorldId, UniverseClient* universe);
   ~WorldClientThread();
 
   ClientSubWorldId subWorldId() const;

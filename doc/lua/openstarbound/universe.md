@@ -2,6 +2,24 @@
 
 Server-side and client-side scripts gain access to a `universe` table that exposes helpers for worlds, as well as administrative helpers for connected clients on server-side scripts.
 
+---
+
+#### `ConnectionId` universe.connectionId()
+
+Returns the universe's connection id. For server universes this is always 0.
+
+---
+
+#### `RpcPromise<Json>` universe.sendUniverseMessage(`ConnectionId` connection, `String` messageName, [`Json` args ...])
+
+Sends a message to the given connectionId's universe.
+
+---
+
+#### `RpcPromise<Json>` universe.sendOwnUniverseMessage(`String` messageName, [`Json` args ...])
+
+Sends a message to the main UniverseClient on clientside or UniverseServer on serverside. Useful for threads communicating with the primary universe thread.
+
 --- 
 
 The following callbacks are only available in contexts that run on the server (such as world scripts or the command
@@ -145,7 +163,13 @@ Otherwise, functionally similar to `universe.createCustomWorld`.
 
 ---
 
-The following functions are available on all scripts on the client main thread.
+The following functions are available on all scripts on the client main thread, all scripts in subworlds, and all scriptable threads made by world contexts and universe client contexts.
+
+---
+
+#### `RpcPromise<Json>` universe.sendServerUniverseMessage(`String` messageName, [`Json` args ...])
+
+Sends a message to the server universe.
 
 ---
 
@@ -163,9 +187,30 @@ Otherwise, functionally similar to `universe.createClientCustomWorld`.
 
 ---
 
-#### `unsigned` universe.clientUuid()
+#### `double` universe.time()
 
-Returns the client uuid. This is the uuid of the player the client joined with, which is the uuid present in client custom world IDs and the client's shipworld ID.
+Returns the universe time.
+
+---
+
+#### `Uuid` universe.serverUuid()
+
+Returns the uuid of the server. This is the uuid used to track bookmarks.
+
+---
+
+#### `Uuid` universe.originalPlayerUuid()
+
+Returns the original player uuid. This is the uuid of the player the client joined with, which is the player the client's ship is for.
+
+---
+
+#### `Uuid` universe.clientUuid()
+
+Returns the client uuid. This is the uuid of the client, which is the uuid present in client custom world IDs, the client's shipworld ID, and other warps related to the client.
+
+If `consistentClientUuid` in the configuration is `false` or undefined, or the client universe lock can't be acquired (due to another client running with the same storage folder),
+this is equivalent to `universe.originalPlayerUuid`.
 
 ---
 
@@ -178,6 +223,10 @@ Returns the OpenProtocolVersion used for networking with the server.
 #### `Vec2U` universe.playerCount()
 
 Returns the server's current player count and maximum players.
+
+---
+
+The following callbacks are only available on the client main thread.
 
 ---
 
@@ -207,7 +256,7 @@ If a subworld is active on the given world, unloads it.
 
 ---
 
-#### `RpcThreadPromise<Json>` universe.sendSubWorldMessage(`String` worldId, `String` messageName, [`Json` args ...])
+#### `RpcPromise<Json>` universe.sendSubWorldMessage(`String` worldId, `String` messageName, [`Json` args ...])
 
 Loads the given world as a subworld if it is not loaded.
 If it is loaded, sends a message to the subworld on the given world.

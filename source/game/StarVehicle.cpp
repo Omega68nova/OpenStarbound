@@ -184,18 +184,17 @@ List<DamageNotification> Vehicle::selfDamageNotifications() {
   return m_scriptComponent.invoke<List<DamageNotification>>("selfDamageNotifications").value();
 }
 
-void Vehicle::init(World* world, EntityId entityId, EntityMode mode) {
-  Entity::init(world, entityId, mode);
+void Vehicle::init(World* world, EntityId entityId, EntityMode mode, ConnectionId originConnection) {
+  Entity::init(world, entityId, mode, originConnection);
   m_movementController.init(world);
   m_movementController.setIgnorePhysicsEntities({entityId});
   if (isMaster()) {
     m_scriptComponent.addCallbacks("vehicle", makeVehicleCallbacks());
     m_scriptComponent.addCallbacks(
         "config", LuaBindings::makeConfigCallbacks(bind(&Vehicle::configValue, this, _1, _2)));
-    m_scriptComponent.addCallbacks("entity", LuaBindings::makeEntityCallbacks(this));
     m_scriptComponent.addCallbacks("mcontroller", LuaBindings::makeMovementControllerCallbacks(&m_movementController));
     m_scriptComponent.addCallbacks("animator", LuaBindings::makeNetworkedAnimatorCallbacks(&m_networkedAnimator));
-    m_scriptComponent.init(world);
+    m_scriptComponent.init(this);
   } else {
     m_slaveHeartbeatTimer.reset();
   }
@@ -208,9 +207,8 @@ void Vehicle::init(World* world, EntityId entityId, EntityMode mode) {
     m_scriptedAnimator.addCallbacks("config", LuaBindings::makeConfigCallbacks([this](String const& name, Json const& def) {
         return configValue(name, def);
       }));
-    m_scriptedAnimator.addCallbacks("entity", LuaBindings::makeEntityCallbacks(this));
 
-    m_scriptedAnimator.init(world);
+    m_scriptedAnimator.init(this);
   }
 }
 
@@ -218,7 +216,6 @@ void Vehicle::uninit() {
   m_scriptComponent.uninit();
   m_scriptComponent.removeCallbacks("vehicle");
   m_scriptComponent.removeCallbacks("config");
-  m_scriptComponent.removeCallbacks("entity");
   m_scriptComponent.removeCallbacks("mcontroller");
   m_scriptComponent.removeCallbacks("animator");
   m_movementController.uninit();
@@ -226,7 +223,6 @@ void Vehicle::uninit() {
   if (world()->isClient()) {
     m_scriptedAnimator.removeCallbacks("animationConfig");
     m_scriptedAnimator.removeCallbacks("config");
-    m_scriptedAnimator.removeCallbacks("entity");
   }
 
   Entity::uninit();
@@ -374,16 +370,16 @@ void Vehicle::destroy(RenderCallback* renderCallback) {
   }
 }
 
-Maybe<Json> Vehicle::receiveMessage(ConnectionId connectionId, String const& message, JsonArray const& args) {
+Maybe<ChainableJsonMessageResponse> Vehicle::receiveMessage(ConnectionId connectionId, String const& message, JsonArray const& args) {
   m_aliveMasterConnections[connectionId] = GameTimer(m_slaveControlTimeout);
   if (message.equalsIgnoreCase("control_on")) {
     auto& loungePosition = m_loungePositions.valueAt(args.at(0).toUInt());
     loungePosition.masterControlState[LoungeControlNames.getLeft(args.at(1).toString())].slavesHeld.add(connectionId);
-    return Json();
+    return ChainableJsonMessageResponse(Json());
   } else if (message.equalsIgnoreCase("control_off")) {
     auto& loungePosition = m_loungePositions.valueAt(args.at(0).toUInt());
     loungePosition.masterControlState[LoungeControlNames.getLeft(args.at(1).toString())].slavesHeld.remove(connectionId);
-    return Json();
+    return ChainableJsonMessageResponse(Json());
   } else if (message.equalsIgnoreCase("control_all")) {
     auto& loungePosition = m_loungePositions.valueAt(args.at(0).toUInt());
     Set<LoungeControl> allControlsHeld;
@@ -395,11 +391,11 @@ Maybe<Json> Vehicle::receiveMessage(ConnectionId connectionId, String const& mes
       else
         p.second.slavesHeld.remove(connectionId);
     }
-    return Json();
+    return ChainableJsonMessageResponse(Json());
   } else if (message.equalsIgnoreCase("aim")) {
     auto& loungePosition = m_loungePositions.valueAt(args.at(0).toUInt());
     loungePosition.masterAimPosition = {args.at(1).toFloat(), args.at(2).toFloat()};
-    return Json();
+    return ChainableJsonMessageResponse(Json());
   } else {
     return m_scriptComponent.handleMessage(message, connectionId == world()->connection(), args);
   }

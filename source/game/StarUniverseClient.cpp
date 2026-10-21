@@ -10,6 +10,7 @@
 #include "StarPlayer.hpp"
 #include "StarPlayerLog.hpp"
 #include "StarAssets.hpp"
+#include "StarFile.hpp"
 #include "StarTime.hpp"
 #include "StarNetPackets.hpp"
 #include "StarTcp.hpp"
@@ -24,21 +25,56 @@
 #include "StarPlayerUniverseMap.hpp"
 #include "StarWorldTemplate.hpp"
 
+#include "StarUniverseClientLuaBindings.hpp"
+
 namespace Star {
 
-UniverseClient::UniverseClient(PlayerStoragePtr playerStorage, StatisticsPtr statistics, String const& customWorldStorageDir) {
+UniverseClient::UniverseClient(PlayerStoragePtr playerStorage, StatisticsPtr statistics, String const& universeClientStorageDir) {
   m_storageTriggerDeadline = 0;
   m_playerStorage = std::move(playerStorage);
   m_statistics = std::move(statistics);
-  m_customWorldStorageDirectory = customWorldStorageDir;
+  m_storageDirectory = universeClientStorageDir;
   m_pause = make_shared<atomic<bool>>(false);
   m_luaRoot = make_shared<LuaRoot>();
   m_subWorldThreads = IdMap<ClientSubWorldId,WorldClientThreadPtr>(MinClientSubWorldId,MaxClientSubWorldId);
+  
+  String const lockFile = "universe.lock";
+  
+  if (!File::isDirectory(m_storageDirectory)) {
+    Logger::info("UniverseClient: Creating universe client storage directory");
+    File::makeDirectory(m_storageDirectory);
+  }
+  
+  m_storageDirectoryLock = LockFile::acquireLock(File::relativeTo(m_storageDirectory, lockFile));
+  if (!m_storageDirectoryLock) {
+    Logger::warn("Could not acquire lock for the universe client directory. Client custom worlds and consistent client uuid are disabled.");
+  } else {
+    auto versioningDatabase = Root::singleton().versioningDatabase();
+    auto storageFile = File::relativeTo(m_storageDirectory, "universeclient.dat");
+    if (File::isFile(storageFile)) {
+      try {
+        auto settings = versioningDatabase->loadVersionedJson(VersionedJson::readFile(storageFile), "UniverseClientSettings");
+        m_uuid = Uuid(settings.getString("uuid"));
+      } catch (std::exception const& e) {
+        Logger::error("UniverseClient: Could not load universe settings file, loading defaults {}", outputException(e, false));
+        File::rename(storageFile, strf("{}.{}.fail", storageFile, Time::millisecondsSinceEpoch()));
+      }
+    } else {
+    }
+  }
   reset();
 }
 
 UniverseClient::~UniverseClient() {
   disconnect();
+  if (m_storageDirectoryLock) {
+    auto versioningDatabase = Root::singleton().versioningDatabase();
+    auto versionedSettings = versioningDatabase->makeCurrentVersionedJson("UniverseClientSettings",
+    JsonObject{
+      {"uuid",m_uuid.hex()}
+    });
+    VersionedJson::writeFile(versionedSettings, File::relativeTo(m_storageDirectory, "universeclient.dat"));
+  }
 }
 
 void UniverseClient::setMainPlayer(PlayerPtr player) {
@@ -126,7 +162,8 @@ Maybe<String> UniverseClient::connect(UniverseConnection connection, bool allowA
     }
   }
   connection.packetSocket().setNetRules(compatibilityRules);
-  auto clientConnect = make_shared<ClientConnectPacket>(Root::singleton().assets()->digest(), allowAssetsMismatch, m_mainPlayer->uuid(), m_mainPlayer->name(),
+  auto clientUuid = (m_storageDirectoryLock && root.configuration()->getPath("consistentClientUuid").optBool().value(false)) ? m_uuid : m_mainPlayer->uuid();
+  auto clientConnect = make_shared<ClientConnectPacket>(Root::singleton().assets()->digest(), allowAssetsMismatch, clientUuid, m_mainPlayer->name(),
       m_mainPlayer->shipSpecies(), m_playerStorage->loadShipData(m_mainPlayer->uuid()), m_mainPlayer->shipUpgrades(),
       m_mainPlayer->log()->introComplete(), account);
   clientConnect->info = JsonObject{
@@ -153,12 +190,12 @@ Maybe<String> UniverseClient::connect(UniverseConnection connection, bool allowA
 
   if (auto success = as<ConnectSuccessPacket>(packet)) {
     m_universeClock = make_shared<Clock>();
-    m_clientContext = make_shared<ClientContext>(success->serverUuid, m_mainPlayer->uuid());
+    m_clientContext = make_shared<ClientContext>(success->serverUuid, m_mainPlayer->uuid(), clientUuid);
     m_clientContext->setNetCompatibilityRules(compatibilityRules);
     m_teamClient = make_shared<TeamClient>(m_mainPlayer, m_clientContext);
     m_mainPlayer->setClientContext(m_clientContext);
     m_mainPlayer->setStatistics(m_statistics);
-    m_worldClient = make_shared<WorldClient>(m_mainPlayer, m_luaRoot);
+    m_worldClient = make_shared<WorldClient>(m_mainPlayer, m_luaRoot, this);
     m_worldClient->clientState().setNetCompatibilityRules(compatibilityRules);
     m_worldClient->setAsyncLighting(true);
 
@@ -300,11 +337,47 @@ void UniverseClient::update(float dt) {
     for (auto& p : m_scriptContexts)
       p.second->update();
   }
+  
+  List<UniverseAction> actions;
+  {
+    MutexLocker locker(m_actionsMutex);
+    actions = take(m_actions);
+  }
+  for (auto action : actions) {
+    action(this);
+  }
+  
   m_connection->push(m_worldClient->getOutgoingPackets());
   if (m_connection->packetSocket().netRules().version() >= 16) {
     for (auto& p : m_subWorldThreads) {
       m_connection->push(p.second->pullOutgoingPackets());
     }
+  }
+  
+  for (auto const& uuid : m_universeMessagePromises.keys()) {
+    if (m_universeMessagePromises[uuid].finished()) {
+      if (m_universeMessagePromises[uuid].succeeded()) {
+        m_connection->pushSingle(make_shared<UniverseMessageResponse>(makeRight(*m_universeMessagePromises[uuid].result()), uuid));
+      } else {
+        m_connection->pushSingle(make_shared<UniverseMessageResponse>(makeLeft(*m_universeMessagePromises[uuid].error()), uuid));
+      }
+      m_universeMessagePromises.remove(uuid);
+    }
+  }
+  
+  RecursiveMutexLocker messageLocker(m_messageMutex);
+  List<Message> messages = std::move(m_universeMessages);
+  messageLocker.unlock();
+  
+  for (auto& message : messages) {
+    auto keeper = message.keeper.get<RpcPromiseKeeper<Json>>();
+    if (auto resp = receiveMessage(message.message, true, message.args))
+      if (resp->is<RpcPromise<Json>>())
+        keeper.chain(resp->get<RpcPromise<Json>>());
+      else
+        keeper.fulfill(resp->get<Json>());
+    else
+      keeper.fail("Message not handled by universe");
   }
 
   if (!*m_pause)
@@ -517,7 +590,7 @@ CelestialCoordinate UniverseClient::shipCoordinate() const {
 }
 
 bool UniverseClient::playerOnOwnShip() const {
-  return playerWorld().is<ClientShipWorldId>() && playerWorld().get<ClientShipWorldId>() == m_clientContext->playerUuid();
+  return playerWorld().is<ClientShipWorldId>() && playerWorld().get<ClientShipWorldId>() == m_clientContext->clientUuid();
 }
 
 bool UniverseClient::playerIsOriginal() const {
@@ -535,7 +608,7 @@ bool UniverseClient::isAdmin() const {
 Uuid UniverseClient::teamUuid() const {
   if (auto team = m_teamClient->currentTeam())
     return *team;
-  return m_clientContext->playerUuid();
+  return m_clientContext->clientUuid();
 }
 
 WorldTemplateConstPtr UniverseClient::currentTemplate() const {
@@ -592,6 +665,8 @@ void UniverseClient::startLuaScripts() {
     auto scriptComponent = make_shared<ScriptComponent>();
     scriptComponent->setLuaRoot(m_luaRoot);
     scriptComponent->setScripts(jsonToStringList(p.second.toArray()));
+    
+    scriptComponent->addThreadCallbacks("universe",LuaBindings::makeUniverseClientThreadCallbacks(this));
 
     m_scriptContexts.set(p.first, scriptComponent);
     scriptComponent->init();
@@ -745,12 +820,10 @@ UniverseClient::ScriptComponentPtr UniverseClient::scriptContext(String const& c
 }
 
 void UniverseClient::createCustomWorld(String const& name, Json templateData) {
+  if (!m_storageDirectoryLock)
+    return;
   RecursiveMutexLocker locker(m_mutex);
-  if (!File::isDirectory(m_customWorldStorageDirectory)) {
-    Logger::info("UniverseClient: Creating universe client storage directory");
-    File::makeDirectory(m_customWorldStorageDirectory);
-  }
-  String filename = File::relativeTo(m_customWorldStorageDirectory, strf("{}.world", name));
+  String filename = File::relativeTo(m_storageDirectory, strf("{}.world", name));
   if (!File::exists(filename)) {
     m_connection->pushSingle(make_shared<ClientCustomWorldCreate>(name, templateData));
   }
@@ -758,7 +831,7 @@ void UniverseClient::createCustomWorld(String const& name, Json templateData) {
 
 ClientSubWorldId UniverseClient::createSubWorld() {
   auto swid = m_subWorldThreads.nextId();
-  auto thread = make_shared<WorldClientThread>(swid);
+  auto thread = make_shared<WorldClientThread>(swid,this);
   thread->setPause(m_pause);
   thread->start();
   m_subWorldThreads.add(swid,thread);
@@ -822,12 +895,12 @@ void UniverseClient::destroySubWorldOnWorld(WorldId worldId) {
   setSubWorldWorld(m_subWorlds.getLeft(worldId), WorldId());
 }
 
-RpcThreadPromise<Json> UniverseClient::sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args) {
+RpcPromise<Json> UniverseClient::sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args) {
   if (m_connection->packetSocket().netRules().version() < 16) {
-    return RpcThreadPromise<Json>::createFailed("Server too old");
+    return RpcPromise<Json>::createFailed("Server too old");
   }
   auto subWorldId = getSubWorldOnWorld(worldId);
-  auto pair = RpcThreadPromise<Json>::createPair();
+  auto pair = RpcPromise<Json>::createPair();
   m_subWorldThreads.get(subWorldId)->passMessage({message, args, pair.second});
   return pair.first;
 }
@@ -838,7 +911,10 @@ RpcPromise<Json> UniverseClient::sendMainWorldMessage(String const& message, Jso
     return RpcPromise<Json>::createFailed("Not connected");
   }
   if (auto resp = m_worldClient->receiveMessage(ServerConnectionId, message, args)) {
-    return RpcPromise<Json>::createFulfilled(*resp);
+    if (resp->is<RpcPromise<Json>>())
+      return resp->get<RpcPromise<Json>>();
+    else
+      return RpcPromise<Json>::createFulfilled(resp->get<Json>());
   } else {
     return RpcPromise<Json>::createFailed("Message not handled by world");
   }
@@ -882,14 +958,14 @@ void UniverseClient::handlePackets(List<PacketPtr> const& packets) {
         m_playerStorage->applyShipUpdates(m_clientContext->playerUuid(), m_clientContext->newShipUpdates());
         
         auto customWorldUpdates = m_clientContext->newCustomWorldUpdates();
-        if (!customWorldUpdates.empty()) {
+        if (!customWorldUpdates.empty() && m_storageDirectoryLock) {
           RecursiveMutexLocker locker(m_mutex);
           for (auto p : customWorldUpdates) {
             if (!p.second.empty()) {
               if (p.first.contains("../") || p.first.contains("..\\")) {
                 Logger::error("Not saving custom world named {}, path attempts to go up.", p.first);
               } else {
-                String filePath = File::relativeTo(m_customWorldStorageDirectory, strf("{}.world", p.first));
+                String filePath = File::relativeTo(m_storageDirectory, strf("{}.world", p.first));
                 WorldStorage::applyWorldChunksUpdateToFile(filePath, p.second);
               }
             }
@@ -949,12 +1025,15 @@ void UniverseClient::handlePackets(List<PacketPtr> const& packets) {
         m_serverInfo = ServerInfo{serverInfoPacket->players, serverInfoPacket->maxPlayers};
       } else if (auto clientCustomWorldRequest = as<ClientCustomWorldRequest>(packet)) {
         Logger::info("UniverseClient: Received request for client custom world {}.", clientCustomWorldRequest->name);
-        if (clientCustomWorldRequest->name.contains("../") || clientCustomWorldRequest->name.contains("..\\")) {
+        if (!m_storageDirectoryLock) {
+          Logger::error("Rejecting custom world {}, client lacks universe lock.", clientCustomWorldRequest->name);
+          m_connection->pushSingle(make_shared<ClientCustomWorldResponse>(clientCustomWorldRequest->name, WorldChunks()));
+        } else if (clientCustomWorldRequest->name.contains("../") || clientCustomWorldRequest->name.contains("..\\")) {
           Logger::error("Rejecting custom world name {}, path attempts to go up.", clientCustomWorldRequest->name);
           m_connection->pushSingle(make_shared<ClientCustomWorldResponse>(clientCustomWorldRequest->name, WorldChunks()));
         } else {
           RecursiveMutexLocker locker(m_mutex);
-          String filename = File::relativeTo(m_customWorldStorageDirectory, strf("{}.world", clientCustomWorldRequest->name));
+          String filename = File::relativeTo(m_storageDirectory, strf("{}.world", clientCustomWorldRequest->name));
           if (File::exists(filename)) {
             try {
                 m_connection->pushSingle(make_shared<ClientCustomWorldResponse>(clientCustomWorldRequest->name, WorldStorage::getWorldChunksFromFile(filename)));
@@ -969,13 +1048,13 @@ void UniverseClient::handlePackets(List<PacketPtr> const& packets) {
         }
       } else if (auto worldLoadNotification = as<NotifyWorldLoad>(packet)) {
         if (auto customWorldId = worldLoadNotification->worldId.ptr<ClientCustomWorldId>()) {
-          if (customWorldId->uuid == m_clientContext->playerUuid()) {
+          if (customWorldId->uuid == m_clientContext->clientUuid()) {
             for (auto& p : m_scriptContexts) {
               p.second->invoke("clientCustomWorldLoaded",customWorldId->name,printWorldId(worldLoadNotification->worldId));
             }
           }
         } else if (auto shipWorldId = worldLoadNotification->worldId.ptr<ClientShipWorldId>()) {
-          if (*shipWorldId == m_clientContext->playerUuid()) {
+          if (*shipWorldId == m_clientContext->clientUuid()) {
             for (auto& p : m_scriptContexts) {
               p.second->invoke("shipWorldLoaded",printWorldId(worldLoadNotification->worldId));
             }
@@ -1009,6 +1088,27 @@ void UniverseClient::handlePackets(List<PacketPtr> const& packets) {
       } else if (auto logMapUpdate = as<LogMapUpdate>(packet)) {
         for (auto& p : logMapUpdate->map) {
           LogMap::setValue(p.first,p.second);
+        }
+      } else if (auto universeMessage = as<UniverseMessage>(packet)) {
+        if (auto response = receiveMessage(universeMessage->message, false, universeMessage->args)) {
+          if (response->is<Json>()) {
+            m_connection->pushSingle(make_shared<UniverseMessageResponse>(makeRight(response->get<Json>()), universeMessage->uuid));
+          } else {
+            // delay the response until this promise is done
+            m_universeMessagePromises[universeMessage->uuid] = response->get<RpcPromise<Json>>();
+          } 
+        } else
+          m_connection->pushSingle(make_shared<UniverseMessageResponse>(makeLeft("Message not handled by universe"), universeMessage->uuid));
+      } else if (auto universeMessageResponse = as<UniverseMessageResponse>(packet)) {
+        RecursiveMutexLocker messageLocker(m_messageMutex);
+        if (!m_universeMessageResponses.contains(universeMessageResponse->uuid))
+          Logger::warn("UniverseClient: UniverseMessageResponse received for unknown context [{}]!", universeMessageResponse->uuid.hex());
+        else {
+          auto response = m_universeMessageResponses.take(universeMessageResponse->uuid);
+          if (universeMessageResponse->response.isRight())
+            response.fulfill(universeMessageResponse->response.right());
+          else
+            response.fail(universeMessageResponse->response.left());
         }
       } else if (!m_systemWorldClient->handleIncomingPacket(packet)) {
         // see if the system world will handle it, otherwise pass it along to the world client
@@ -1046,6 +1146,50 @@ void UniverseClient::reset() {
     m_playerStorage->savePlayer(m_mainPlayer);
 
   m_connection.reset();
+  
+  RecursiveMutexLocker messageLocker(m_messageMutex);
+  m_universeMessageResponses = {};
+  m_universeMessagePromises = {};
+  messageLocker.unlock();
+}
+
+void UniverseClient::passMessage(Universe::Message&& message) {
+  RecursiveMutexLocker locker(m_messageMutex);
+  m_universeMessages.append(std::move(message));
+}
+
+RpcPromise<Json> UniverseClient::sendUniverseMessage(ConnectionId const& connectionId, String const& message, JsonArray const& args) {
+  if (connectionId == m_clientContext->connectionId()) {
+    auto pair = RpcPromise<Json>::createPair();
+    passMessage({message,args,pair.second});
+    return pair.first;
+  } else {
+    if (connectionVersion() < 18) {
+      return RpcPromise<Json>::createFailed("Server is not new enough");
+    }
+    auto pair = RpcPromise<Json>::createPair();
+    Uuid uuid;
+    RecursiveMutexLocker messageLocker(m_messageMutex);
+    m_universeMessageResponses[uuid] = pair.second;
+    messageLocker.unlock();
+    m_connection->pushSingle(make_shared<UniverseMessage>(connectionId, message, args, uuid));
+    return pair.first;
+  }
+}
+
+Maybe<ChainableJsonMessageResponse> UniverseClient::receiveMessage(String const& message, bool const& local, JsonArray const& args) {
+  Maybe<ChainableJsonMessageResponse> result;
+  for (auto& p : m_scriptContexts) {
+    result = p.second->handleMessage(message, local, args);
+    if (result)
+      break;
+  }
+  return result;
+}
+
+void UniverseClient::executeActionLater(UniverseAction action) {
+  MutexLocker locker(m_actionsMutex);
+  m_actions.append(action);
 }
 
 }

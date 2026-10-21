@@ -21,7 +21,11 @@
 #include "StarWorldTemplate.hpp"
 #include "StarStoredFunctions.hpp"
 #include "StarInspectableEntity.hpp"
+#include "StarUniverseClient.hpp"
 #include "StarCurve25519.hpp"
+
+#include "StarUniverseClientLuaBindings.hpp"
+#include "StarCelestialLuaBindings.hpp"
 
 namespace Star {
 
@@ -29,10 +33,12 @@ const std::string SECRET_BROADCAST_PUBLIC_KEY = "SecretBroadcastPublicKey";
 const std::string SECRET_BROADCAST_PREFIX = "\0Broadcast\0"s;
 
 const float WorldClient::DropDist = 6.0f;
-WorldClient::WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot) {
+WorldClient::WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot, UniverseClient* universe) {
   // main client world, set up to render
   auto& root = Root::singleton();
   auto assets = root.assets();
+  
+  m_universe = universe;
 
   m_clientConfig = assets->json("/client.config");
   
@@ -56,6 +62,8 @@ WorldClient::WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot) {
   m_inWorld = false;
 
   m_luaRoot = luaRoot;
+  m_luaThreadCallbacks["universe"] = LuaBindings::makeUniverseClientThreadCallbacks(universe);
+  m_luaThreadCallbacks["celestial"] = LuaBindings::makeCelestialCallbacks(universe->celestialDatabase());
 
   m_mainPlayer = mainPlayer;
 
@@ -102,10 +110,12 @@ WorldClient::WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot) {
   clearWorld();
 }
 
-WorldClient::WorldClient(ClientSubWorldId subWorldId) {
+WorldClient::WorldClient(ClientSubWorldId subWorldId, UniverseClient* universe) {
   // client subworld, doesn't render
   auto& root = Root::singleton();
   auto assets = root.assets();
+  
+  m_universe = universe;
 
   m_clientConfig = assets->json("/client.config");
   
@@ -122,6 +132,10 @@ WorldClient::WorldClient(ClientSubWorldId subWorldId) {
   m_luaRoot = make_shared<LuaRoot>();
   m_luaRoot->luaEngine().setNullTerminated(false);
   m_luaRoot->tuneAutoGarbageCollection(m_clientConfig.getFloat("luaGcPause"), m_clientConfig.getFloat("luaGcStepMultiplier"));
+  m_luaThreadCallbacks["universe"] = LuaBindings::makeUniverseClientThreadCallbacks(universe);
+  m_luaThreadCallbacks["celestial"] = LuaBindings::makeCelestialCallbacks(universe->celestialDatabase());
+  m_luaRoot->addCallbacks("universe",m_luaThreadCallbacks["universe"]);
+  m_luaRoot->addCallbacks("celestial",m_luaThreadCallbacks["celestial"]);
 
   m_collisionGenerator.init([this](int x, int y) {
     if (!m_predictedTiles.empty()) {
@@ -1222,10 +1236,14 @@ void WorldClient::handleIncomingPackets(List<PacketPtr> const& packets) {
         if (fromConnection == *m_clientId) // Kae: The server should not be able to forge entity messages that appear as if they're from us
           fromConnection = ServerConnectionId;
 
-        auto response = entity->receiveMessage(entityMessagePacket->fromConnection, entityMessagePacket->message, entityMessagePacket->args);
-        if (response)
-          m_outgoingPackets.append(make_shared<EntityMessageResponsePacket>(makeRight(response.take()), entityMessagePacket->uuid));
-        else
+        if (auto response = entity->receiveMessage(entityMessagePacket->fromConnection, entityMessagePacket->message, entityMessagePacket->args)) {
+          if (response->is<Json>()) {
+            m_outgoingPackets.append(make_shared<EntityMessageResponsePacket>(makeRight(response->get<Json>()), entityMessagePacket->uuid));
+          } else {
+            // delay the response until this promise is done
+            m_entityMessagePromises[entityMessagePacket->uuid] = response->get<RpcPromise<Json>>();
+          } 
+        } else
           m_outgoingPackets.append(make_shared<EntityMessageResponsePacket>(makeLeft("Message not handled by entity"), entityMessagePacket->uuid));
       }
 
@@ -1291,7 +1309,20 @@ void WorldClient::handleIncomingPackets(List<PacketPtr> const& packets) {
 
     } else if (auto worldParametersUpdate = as<WorldParametersUpdatePacket>(packet)) {
       m_worldTemplate->setWorldParameters(netLoadVisitableWorldParameters(worldParametersUpdate->parametersData));
-
+      
+    } else if (auto worldPermissionsUpdate = as<WorldPermissionsUpdate>(packet)) {
+      auto hasPermission = worldPermissionsUpdate->hasPermission;
+      switch (worldPermissionsUpdate->permission) {
+        case WorldPermissionType::Build:
+          m_permissions.build = hasPermission;
+          break;
+        case WorldPermissionType::Containers:
+          m_permissions.containers = hasPermission;
+          break;
+        case WorldPermissionType::Interact:
+          m_permissions.interact = hasPermission;
+          break;
+      }
     } else if (auto pongPacket = as<PongPacket>(packet)) {
       if (pongPacket->time)
         m_latency = Time::monotonicMilliseconds() - pongPacket->time;
@@ -1308,13 +1339,13 @@ List<PacketPtr> WorldClient::getOutgoingPackets() {
   return std::move(m_outgoingPackets);
 }
 
-Maybe<Json> WorldClient::receiveMessage(ConnectionId fromConnection, String const& message, JsonArray const& args) {
+Maybe<ChainableJsonMessageResponse> WorldClient::receiveMessage(ConnectionId fromConnection, String const& message, JsonArray const& args) {
   m_expiryTimer.reset();
   if (!inWorld()) {
     // script contexts aren't active to handle this message
     return {};
   }
-  Maybe<Json> result;
+  Maybe<ChainableJsonMessageResponse> result;
   for (auto& p : m_scriptContexts) {
     result = p.second->handleMessage(message, fromConnection == ServerConnectionId, args);
     if (result)
@@ -1532,6 +1563,17 @@ void WorldClient::update(float dt) {
 
   for (EntityId entityId : toRemove)
     removeEntity(entityId, true);
+  
+  for (auto const& uuid : m_entityMessagePromises.keys()) {
+    if (m_entityMessagePromises[uuid].finished()) {
+      if (m_entityMessagePromises[uuid].succeeded()) {
+        m_outgoingPackets.append(make_shared<EntityMessageResponsePacket>(makeRight(*m_entityMessagePromises[uuid].result()), uuid));
+      } else {
+        m_outgoingPackets.append(make_shared<EntityMessageResponsePacket>(makeLeft(*m_entityMessagePromises[uuid].error()), uuid));
+      }
+      m_entityMessagePromises.remove(uuid);
+    }
+  }
 
   queueUpdatePackets(m_entityUpdateTimer.wrapTick(dt));
 
@@ -1636,6 +1678,10 @@ void WorldClient::addEntity(EntityPtr const& entity, EntityId entityId) {
   }
 }
 
+void WorldClient::addEntity(EntityPtr const& entity, ConnectionId connection, EntityId entityId) {
+  addEntity(entity,entityId);
+}
+
 TileDamageResult WorldClient::damageTiles(List<Vec2I> const& pos, TileLayer layer, Vec2F const& sourcePosition, TileDamage const& tileDamage, Maybe<EntityId> sourceEntity) {
   if (!inWorld())
     return TileDamageResult::None;
@@ -1734,6 +1780,8 @@ WorldClient::BroadcastCallback& WorldClient::broadcastCallback() {
 
 bool WorldClient::isTileProtected(Vec2I const& pos) const {
   if (!inWorld())
+    return true;
+  if (!connectionHasPermission(0,WorldPermissionType::Build))
     return true;
 
   auto const& tile = m_tileArray->tile(pos);
@@ -2088,6 +2136,8 @@ void WorldClient::initWorld(WorldStartPacket const& startPacket) {
   m_dungeonIdGravity = startPacket.dungeonIdGravity;
   m_dungeonIdBreathable = startPacket.dungeonIdBreathable;
   m_protectedDungeonIds = startPacket.protectedDungeonIds;
+  
+  m_permissions = startPacket.permissions;
 
   m_geometry = WorldGeometry(m_worldTemplate->size());
 
@@ -2226,6 +2276,7 @@ void WorldClient::clearWorld() {
 
   m_entityMessageResponses = {};
   m_findUniqueEntityResponses = {};
+  m_entityMessagePromises = {};
 
   m_forceRegions.clear();
   
@@ -2500,6 +2551,12 @@ bool WorldClient::exposedToWeather(Vec2F const& pos) const {
   return false;
 }
 
+Maybe<String> WorldClient::activeWeather(Vec2F const& pos) const {
+  if (!inWorld())
+    return {};
+  return m_weather.activeWeather();
+}
+
 bool WorldClient::isUnderground(Vec2F const& pos) const {
   if (!inWorld())
     return true;
@@ -2636,6 +2693,26 @@ LuaRootPtr WorldClient::luaRoot() {
   return m_luaRoot;
 }
 
+StringMap<LuaCallbacks> WorldClient::luaThreadCallbacks() const {
+  return m_luaThreadCallbacks;
+}
+
+bool WorldClient::connectionHasPermission(ConnectionId connection, WorldPermissionType permission) const {
+  if (!m_headless)
+    if (m_mainPlayer->isAdmin()) {
+      return true;
+    }
+  if (m_permissions.build)
+    return true;
+  if (!m_permissions.interact)
+    return false;
+  if (permission == WorldPermissionType::Containers) {
+    return m_permissions.containers;
+  } else {
+    return permission == WorldPermissionType::Interact;
+  }
+}
+
 bool WorldClient::pullRequestedDestroy() {
   auto out = m_requestedDestroy;
   m_requestedDestroy = false;
@@ -2678,9 +2755,12 @@ RpcPromise<Json> WorldClient::sendEntityMessage(Variant<EntityId, String> const&
   if (entityId.is<EntityId>() && !entity && m_clientId == connectionForEntity(entityId.get<EntityId>())) {
     return RpcPromise<Json>::createFailed("Unknown entity");
   } else if (entity && entity->isMaster()) {
-    if (auto resp = entity->receiveMessage(*m_clientId, message, args))
-      return RpcPromise<Json>::createFulfilled(resp.take());
-    else
+    if (auto resp = entity->receiveMessage(*m_clientId, message, args)) {
+      if (resp->is<Json>())
+        return RpcPromise<Json>::createFulfilled(resp->get<Json>());
+      else
+        return resp->get<RpcPromise<Json>>();
+    } else
       return RpcPromise<Json>::createFailed("Message not handled by entity");
   } else {
     auto pair = RpcPromise<Json>::createPair();

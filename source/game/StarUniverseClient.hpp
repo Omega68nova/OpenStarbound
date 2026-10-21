@@ -12,6 +12,9 @@
 #include "StarWorldClientThread.hpp"
 #include "StarLuaComponents.hpp"
 #include "StarUniverse.hpp"
+#include "StarLockFile.hpp"
+
+// TODO: make this more thread safe
 
 namespace Star {
 
@@ -36,10 +39,10 @@ STAR_CLASS(LuaRoot);
 
 class UniverseClient : public Universe {
 public:
-  typedef LuaUpdatableComponent<LuaBaseComponent> ScriptComponent;
+  typedef LuaMessageHandlingComponent<LuaUpdatableComponent<LuaBaseComponent>> ScriptComponent;
   typedef shared_ptr<ScriptComponent> ScriptComponentPtr;
   
-  UniverseClient(PlayerStoragePtr playerStorage, StatisticsPtr statistics, String const& customWorldStorageDir);
+  UniverseClient(PlayerStoragePtr playerStorage, StatisticsPtr statistics, String const& universeClientStorageDir);
   ~UniverseClient();
 
   void setMainPlayer(PlayerPtr player);
@@ -128,10 +131,17 @@ public:
   ClientSubWorldId getSubWorldOnWorld(WorldId worldId);
   void destroySubWorldOnWorld(WorldId worldId);
 
-  RpcThreadPromise<Json> sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
+  RpcPromise<Json> sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
   RpcPromise<Json> sendMainWorldMessage(String const& message, JsonArray const& args = {});
 
   bool paused() const;
+  
+  void passMessage(Universe::Message&& message) override;
+  RpcPromise<Json> sendUniverseMessage(ConnectionId const& connectionId, String const& message, JsonArray const& args = {}) override;
+  
+  Maybe<ChainableJsonMessageResponse> receiveMessage(String const& message, bool const& local, JsonArray const& args) override;
+  
+  void executeActionLater(UniverseAction action) override;
 
 private:
   struct ServerInfo {
@@ -150,7 +160,8 @@ private:
   StatisticsPtr m_statistics;
   PlayerPtr m_mainPlayer;
   
-  String m_customWorldStorageDirectory;
+  String m_storageDirectory;
+  Maybe<LockFile> m_storageDirectoryLock;
 
   shared_ptr<atomic<bool>> m_pause;
   ClockPtr m_universeClock;
@@ -189,6 +200,17 @@ private:
 
   ReloadPlayerCallback m_playerReloadPreCallback;
   ReloadPlayerCallback m_playerReloadCallback;
+
+  mutable RecursiveMutex m_messageMutex;
+  List<Universe::Message> m_universeMessages;
+  
+  HashMap<Uuid, RpcPromiseKeeper<Json>> m_universeMessageResponses;
+  HashMap<Uuid, RpcPromise<Json>> m_universeMessagePromises;
+  
+  Uuid m_uuid = Uuid();
+  
+  mutable Mutex m_actionsMutex;
+  List<UniverseAction> m_actions;
 };
 
 }

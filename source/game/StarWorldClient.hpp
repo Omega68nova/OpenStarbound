@@ -28,6 +28,7 @@ STAR_CLASS(DamageManager);
 STAR_CLASS(EntityMap);
 STAR_CLASS(ParticleManager);
 STAR_CLASS(WorldClient);
+STAR_CLASS(UniverseClient);
 STAR_CLASS(Player);
 STAR_CLASS(Item);
 STAR_CLASS(CelestialLog);
@@ -42,8 +43,8 @@ public:
   typedef LuaMessageHandlingComponent<LuaUpdatableComponent<LuaWorldComponent<LuaBaseComponent>>> ScriptComponent;
   typedef shared_ptr<ScriptComponent> ScriptComponentPtr;
   
-  WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot);
-  WorldClient(ClientSubWorldId subWorldId);
+  WorldClient(PlayerPtr mainPlayer, LuaRootPtr luaRoot, UniverseClient* universe);
+  WorldClient(ClientSubWorldId subWorldId, UniverseClient* universe);
   ~WorldClient();
 
   ConnectionId connection() const override;
@@ -62,6 +63,7 @@ public:
   bool damageWouldDestroy(Vec2I const& pos, TileLayer layer, TileDamage const& tileDamage) const override;
   EntityPtr entity(EntityId entityId) const override;
   void addEntity(EntityPtr const& entity, EntityId entityId = NullEntityId) override;
+  void addEntity(EntityPtr const& entity, ConnectionId connection, EntityId entityId = NullEntityId) override;
   EntityPtr closestEntity(Vec2F const& center, float radius, EntityFilter selector = EntityFilter()) const override;
   void forAllEntities(EntityCallback entityCallback) const override;
   void forEachEntity(RectF const& boundBox, EntityCallback callback) const override;
@@ -91,6 +93,7 @@ public:
   StringList environmentStatusEffects(Vec2F const& pos) const override;
   StringList weatherStatusEffects(Vec2F const& pos) const override;
   bool exposedToWeather(Vec2F const& pos) const override;
+  Maybe<String> activeWeather(Vec2F const& pos) const override;
   bool isUnderground(Vec2F const& pos) const override;
   bool disableDeathDrops() const override;
   List<PhysicsForceRegion> forceRegions() const override;
@@ -105,6 +108,9 @@ public:
   RpcPromise<Vec2F> findUniqueEntity(String const& uniqueId) override;
   RpcPromise<Json> sendEntityMessage(Variant<EntityId, String> const& entity, String const& message, JsonArray const& args = {}) override;
   bool isTileProtected(Vec2I const& pos) const override;
+  StringMap<LuaCallbacks> luaThreadCallbacks() const override;
+  
+  bool connectionHasPermission(ConnectionId connection, WorldPermissionType permission) const override;
 
   // Is this WorldClient properly initialized in a world
   bool inWorld() const;
@@ -159,7 +165,7 @@ public:
   RectI clientWindow() const;
   WorldClientState& clientState();
 
-  Maybe<Json> receiveMessage(ConnectionId fromConnection, String const& message, JsonArray const& args);
+  Maybe<ChainableJsonMessageResponse> receiveMessage(ConnectionId fromConnection, String const& message, JsonArray const& args);
 
   ScriptComponentPtr scriptContext(String const& contextName);
 
@@ -411,6 +417,7 @@ private:
 
   HashMap<String, List<RpcPromiseKeeper<Vec2F>>> m_findUniqueEntityResponses;
   HashMap<Uuid, RpcPromiseKeeper<Json>> m_entityMessageResponses;
+  HashMap<Uuid, RpcPromise<Json>> m_entityMessagePromises;
   HashMap<Uuid, RpcPromiseKeeper<InteractAction>> m_entityInteractionResponses;
 
   List<PhysicsForceRegion> m_forceRegions;
@@ -423,6 +430,12 @@ private:
   StringMap<ScriptComponentPtr> m_scriptContexts;
 
   GameTimer m_expiryTimer;
+  
+  UniverseClient* m_universe;
+  
+  StringMap<LuaCallbacks> m_luaThreadCallbacks;
+  
+  WorldPermissions m_permissions;
 };
 
 }

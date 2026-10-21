@@ -8,13 +8,13 @@
 
 namespace Star {
 
-WorldClientThread::WorldClientThread(ClientSubWorldId subWorldId)
+WorldClientThread::WorldClientThread(ClientSubWorldId subWorldId, UniverseClient* universe)
   : Thread("WorldClientThread: " + String(subWorldId)),
     m_subWorldId(subWorldId),
     m_stop(false),
     m_errorOccurred(false),
     m_shouldExpire(false) {
-    m_worldClient = make_shared<WorldClient>(subWorldId);
+    m_worldClient = make_shared<WorldClient>(subWorldId,universe);
 }
 
 WorldClientThread::~WorldClientThread() {
@@ -141,7 +141,10 @@ void WorldClientThread::update() {
     }
     for (auto& message : messages) {
       if (auto resp = m_worldClient->receiveMessage(ServerConnectionId, message.message, message.args))
-        message.promise.fulfill(*resp);
+        if (resp->is<RpcPromise<Json>>())
+          message.promise.chain(resp->get<RpcPromise<Json>>());
+        else
+          message.promise.fulfill(resp->get<Json>());
       else
         message.promise.fail("Message not handled by world");
     }
