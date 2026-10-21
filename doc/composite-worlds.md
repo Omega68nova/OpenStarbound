@@ -47,6 +47,23 @@ universe.unloadSubWorld(planetWorldId)
 and has received its world template. The example chooses a gap of eight
 tiles; the mod should make it configurable.
 
+### Queries used when preparing a seamless handoff
+
+`universe.compositeWorldSize(worldId)` returns `nil` until the target world
+is initialized and its actual dimensions are known.
+
+`universe.compositeRegionAtHeight(virtualY)` returns the single loaded,
+registered world whose original vertical bounds contain the requested
+coordinate. If two worlds overlap or a required world is unavailable, it
+returns `nil` rather than silently assigning authority. This function
+does **not** transfer players; the authoritative handoff protocol remains
+unimplemented.
+
+The compositor clips each source's tile subscription to its original
+`[0, height)` vertical tile interval while painting the screen's
+intersection with that region. A world may remain subscribed with an
+empty tile viewport while out of frame.
+
 ## Server permission for planetary test mods
 
 SubWorld subscriptions still use OpenStarbound's existing server
