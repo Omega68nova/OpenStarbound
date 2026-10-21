@@ -136,6 +136,9 @@ public:
   void setCompositeWorldPlacement(WorldId const& worldId, Vec2I const& offset);
   void clearCompositeWorldPlacement(WorldId const& worldId);
   JsonArray compositeWorldPlacements() const;
+  bool compositeRenderingActive() const;
+  // Access matching subworlds under their update-thread locks for rendering.
+  void forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action);
 
   RpcPromise<Json> sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
   RpcPromise<Json> sendMainWorldMessage(String const& message, JsonArray const& args = {});
