@@ -498,7 +498,16 @@ void ClientApplication::render() {
           subCamera.setVerticalClamping(false);
           subCamera.setWorldGeometry(subWorld->geometry());
           subCamera.setCenterWorldPosition(mainCamera.centerWorldPosition() - Vec2F(delta), true);
-          subWorld->setCompositeRenderWindow(subCamera.worldTileRect());
+          // Subscribe only to tiles that actually exist in the secondary
+          // world's Y range, even when the camera straddles the seam.
+          RectI sourceWindow = subCamera.worldTileRect();
+          int tileBottom = std::max(0, sourceWindow.yMin());
+          int tileTop = std::min((int)subWorld->geometry().height(), sourceWindow.yMax());
+          if (tileTop <= tileBottom) {
+            subWorld->setCompositeRenderWindow(RectI());
+            return;
+          }
+          subWorld->setCompositeRenderWindow(RectI(sourceWindow.xMin(), tileBottom, sourceWindow.xMax(), tileTop));
           subWorld->render(m_compositeRenderData, TilePainter::BorderTileSize);
           String worldKey = printWorldId(placement.worldId);
           if (!m_compositeWorldPainters.contains(worldKey)) {
