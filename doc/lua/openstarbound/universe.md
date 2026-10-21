@@ -262,11 +262,19 @@ Registers or replaces a client-local virtual placement for the given world ID.
 Coordinates in that world map to virtual coordinates by adding `offset`.
 Placements do not modify the underlying worlds, world files, gravity, physics, or planet heights.
 
-**Experimental foundation:** placements are recorded and queryable, but the
-renderer, camera, and server-authoritative boundary transfer are **not yet
-connected** to this registry. Calling this function alone does not display
-another world. For now, scripts may separately call `loadSubWorld` to
-request a secondary world on the server.
+**Experimental vertical composition:** if the mod also calls
+`loadSubWorld(worldId)`, the client now renders that loaded world at this
+offset using a separate WorldPainter and a vertically clipped pass. Secondary
+worlds continue to have no main player and are simulated independently.
+The primary camera can scroll beyond its own source world's vertical limits
+while composition placements exist. Placement alone does not load a world.
+
+The renderer currently clips each secondary world to its full translated
+**vertical extent** (local Y from 0 to its full world height), so the source
+planet's existing sky and space layer are preserved. This first pass is
+intended for vertically stacked worlds; independent horizontal region clipping,
+compositing order controls for overlapping layers, seamless player/server
+handoffs and cross-world collisions are not yet implemented.
 
 ---
 
@@ -300,8 +308,10 @@ universe.clearCompositeWorldPlacement(shipWorldId)
 universe.unloadSubWorld(planetWorldId)
 ```
 
-The sample describes placement/lifecycle intent only; it does not yet
-produce composite rendering or seamless inter-world travel.
+The sample now requests composite rendering once the secondary world loads,
+but does **not** enable seamless inter-world travel. A mod still must ensure
+that unloading takes place after the secondary region leaves the viewport
+and that players have returned to an authoritative source world.
 
 ---
 
