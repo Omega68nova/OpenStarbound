@@ -924,6 +924,34 @@ JsonArray UniverseClient::compositeWorldPlacements() const {
   return placements;
 }
 
+bool UniverseClient::compositeRenderingActive() const {
+  RecursiveMutexLocker locker(m_mutex);
+  return !m_compositeWorldPlacements.empty();
+}
+
+void UniverseClient::forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action) {
+  RecursiveMutexLocker locker(m_mutex);
+  if (!m_clientContext)
+    return;
+
+  WorldId primaryWorld = playerWorld();
+  for (auto const& p : m_compositeWorldPlacements) {
+    auto const& placement = p.second;
+    if (placement.worldId == primaryWorld || !m_subWorlds.hasRightValue(placement.worldId))
+      continue;
+    auto subWorldId = m_subWorlds.getLeft(placement.worldId);
+    if (!m_subWorldThreads.contains(subWorldId))
+      continue;
+    auto thread = m_subWorldThreads.get(subWorldId);
+    if (thread->errorOccurred())
+      continue;
+    thread->executeAction([&](WorldClientThread*, WorldClient* subWorld) {
+      if (subWorld->inWorld())
+        action(placement, subWorld);
+    });
+  }
+}
+
 RpcPromise<Json> UniverseClient::sendSubWorldOnWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args) {
   if (m_connection->packetSocket().netRules().version() < 16) {
     return RpcPromise<Json>::createFailed("Server too old");
