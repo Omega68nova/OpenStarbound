@@ -118,8 +118,8 @@ private:
   PlayerPtr m_player;
   WorldPainterPtr m_worldPainter;
   WorldRenderData m_renderData;
-  // Secondary render pass with independent parallax/tile caches.
-  WorldPainterPtr m_compositeWorldPainter;
+  // Each secondary world needs its own painter to avoid sharing tile/sky caches.
+  StringMap<WorldPainterPtr> m_compositeWorldPainters;
   WorldRenderData m_compositeRenderData;
   MainInterfacePtr m_mainInterface;
   
