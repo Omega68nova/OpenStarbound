@@ -955,6 +955,37 @@ Vec2I UniverseClient::compositeWorldOffset(WorldId const& worldId) const {
   return {};
 }
 
+Maybe<Vec2U> UniverseClient::compositeWorldSize(WorldId const& worldId) {
+  if (!worldId)
+    return {};
+
+  WorldClientThreadPtr thread;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    if (m_clientContext && worldId == playerWorld()) {
+      if (m_worldClient && m_worldClient->inWorld())
+        return m_worldClient->geometry().size();
+      return {};
+    }
+
+    if (!m_subWorlds.hasRightValue(worldId))
+      return {};
+    auto id = m_subWorlds.getLeft(worldId);
+    if (!m_subWorldThreads.contains(id))
+      return {};
+    thread = m_subWorldThreads.get(id);
+  }
+
+  // Do not hold the universe mutex while acquiring the world-thread lock.
+  Maybe<Vec2U> size;
+  if (!thread->errorOccurred())
+    thread->executeAction([&](WorldClientThread*, WorldClient* world) {
+      if (world->inWorld())
+        size = world->geometry().size();
+    });
+  return size;
+}
+
 void UniverseClient::forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action) {
   // Snapshot the references before locking any secondary WorldClient. Its
   // update/scripts may themselves call back into the universe client; holding
