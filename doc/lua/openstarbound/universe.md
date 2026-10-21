@@ -230,6 +230,15 @@ The following callbacks are only available on the client main thread.
 
 ---
 
+#### `String` universe.playerWorldId()
+
+Returns the actual world ID of the current client player's authoritative main world,
+or `Nowhere` during transitions. Useful for identifying when a mod should
+mount a secondary view without assuming that the ship is the main world.
+This does not affect gameplay authority.
+
+---
+
 #### `bool` universe.subWorldActive(`String` worldId)
 
 Returns if a subworld is currently active or requested on the given world.
