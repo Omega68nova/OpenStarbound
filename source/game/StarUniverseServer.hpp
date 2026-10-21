@@ -68,12 +68,14 @@ public:
   String clientNick(ConnectionId clientId) const;
   Maybe<ConnectionId> findNick(String const& nick) const;
 
+  String clientAccount(ConnectionId clientId) const;
+
   Maybe<Uuid> uuidForClient(ConnectionId clientId) const;
   Maybe<ConnectionId> clientForUuid(Uuid const& uuid) const;
 
   void adminBroadcast(String const& text);
   void adminWhisper(ConnectionId clientId, String const& text);
-  String adminCommand(String text);
+  ServerCommandResult adminCommand(String text);
 
   bool isAdmin(ConnectionId clientId) const;
   bool canBecomeAdmin(ConnectionId clientId) const;
@@ -87,7 +89,7 @@ public:
   bool isPvp(ConnectionId clientId) const;
   void setPvp(ConnectionId clientId, bool pvp);
 
-  RpcThreadPromise<Json> sendWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
+  RpcPromise<Json> sendWorldMessage(WorldId const& worldId, String const& message, JsonArray const& args = {});
 
   void clientWarpPlayer(ConnectionId clientId, WarpAction action, bool deploy = false);
   void clientFlyShip(ConnectionId clientId, Vec3I const& system, SystemLocation const& location, Json const& settings = {});
@@ -118,6 +120,14 @@ public:
   void createCustomWorld(CustomWorldId const& customWorld, WorldTemplatePtr worldTemplate);
 
   bool sendPacket(ConnectionId clientId, PacketPtr packet);
+  
+  void passMessage(Universe::Message&& message) override;
+  
+  RpcPromise<Json> sendUniverseMessage(ConnectionId const& connectionId, String const& message, JsonArray const& args = {}) override;
+  
+  Maybe<ChainableJsonMessageResponse> receiveMessage(String const& message, bool const& local, JsonArray const& args) override;
+  
+  void executeActionLater(UniverseAction action) override;
 
 protected:
   virtual void run() override;
@@ -131,12 +141,12 @@ private:
   };
   
   struct WorldServerPromise {
-    Variant<WorkerPoolPromise<WorldServerThreadPtr>,RpcThreadPromise<WorldChunks>> currentPromise;
+    Variant<WorkerPoolPromise<WorldServerThreadPtr>,RpcPromise<WorldChunks>> currentPromise;
     Maybe<function<WorkerPoolPromise<WorldServerThreadPtr>(WorldChunks)>> producer;
     
     double startTime;
     
-    WorldServerPromise(function<WorkerPoolPromise<WorldServerThreadPtr>(WorldChunks)> producer, RpcThreadPromise<WorldChunks> promise);
+    WorldServerPromise(function<WorkerPoolPromise<WorldServerThreadPtr>(WorldChunks)> producer, RpcPromise<WorldChunks> promise);
     WorldServerPromise(WorkerPoolPromise<WorldServerThreadPtr> promise);
     
     bool done() const;
@@ -164,6 +174,7 @@ private:
   void processChat();
   void clearBrokenWorlds();
   void handleWorldMessages();
+  void handleUniverseMessages();
   void shutdownInactiveWorlds();
   void doTriggeredStorage();
 
@@ -296,11 +307,21 @@ private:
 
   List<TimeoutBan> m_tempBans;
 
+  mutable RecursiveMutex m_luaLock;
   LuaRootPtr m_luaRoot;
 
-  typedef LuaUpdatableComponent<LuaBaseComponent> ScriptComponent;
+  typedef LuaMessageHandlingComponent<LuaUpdatableComponent<LuaBaseComponent>> ScriptComponent;
   typedef shared_ptr<ScriptComponent> ScriptComponentPtr;
   StringMap<ScriptComponentPtr> m_scriptContexts;
+
+  mutable RecursiveMutex m_messageLock;
+  List<Universe::Message> m_universeMessages;
+  
+  HashMap<Uuid, pair<ConnectionId, MVariant<ConnectionId, RpcPromiseKeeper<Json>>>> m_universeMessageResponses;
+  HashMap<Uuid, pair<ConnectionId, RpcPromise<Json>>> m_universeMessagePromises;
+  
+  mutable Mutex m_actionsMutex;
+  List<UniverseAction> m_actions;
 };
 
 }

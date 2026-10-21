@@ -118,6 +118,9 @@ private:
   PlayerPtr m_player;
   WorldPainterPtr m_worldPainter;
   WorldRenderData m_renderData;
+  // Each secondary world needs its own painter to avoid sharing tile/sky caches.
+  StringMap<WorldPainterPtr> m_compositeWorldPainters;
+  WorldRenderData m_compositeRenderData;
   MainInterfacePtr m_mainInterface;
   
   StringMap<PostProcessGroup> m_postProcessGroups;

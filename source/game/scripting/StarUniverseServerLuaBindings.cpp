@@ -14,6 +14,7 @@ LuaCallbacks LuaBindings::makeUniverseServerCallbacks(UniverseServer* universe) 
   callbacks.registerCallbackWithSignature<bool, ConnectionId>("isConnectedClient", bind(UniverseServerCallbacks::isConnectedClient, universe, _1));
   callbacks.registerCallbackWithSignature<String, ConnectionId>("clientNick", bind(UniverseServerCallbacks::clientNick, universe, _1));
   callbacks.registerCallbackWithSignature<Maybe<ConnectionId>, String>("findNick", bind(UniverseServerCallbacks::findNick, universe, _1));
+  callbacks.registerCallbackWithSignature<String, ConnectionId>("clientAccount", bind(UniverseServerCallbacks::clientAccount, universe, _1));
   callbacks.registerCallbackWithSignature<void, String>("adminBroadcast", bind(UniverseServerCallbacks::adminBroadcast, universe, _1));
   callbacks.registerCallbackWithSignature<void, ConnectionId, String>("adminWhisper", bind(UniverseServerCallbacks::adminWhisper, universe, _1, _2));
   callbacks.registerCallbackWithSignature<bool, ConnectionId>("isAdmin", bind(UniverseServerCallbacks::isAdmin, universe, _1));
@@ -21,7 +22,7 @@ LuaCallbacks LuaBindings::makeUniverseServerCallbacks(UniverseServer* universe) 
   callbacks.registerCallbackWithSignature<void, ConnectionId, bool>("setPvp", bind(UniverseServerCallbacks::setPvp, universe, _1, _2));
   callbacks.registerCallbackWithSignature<bool, String>("isWorldActive", bind(UniverseServerCallbacks::isWorldActive, universe, _1));
   callbacks.registerCallbackWithSignature<StringList>("activeWorlds", bind(UniverseServerCallbacks::activeWorlds, universe));
-  callbacks.registerCallbackWithSignature<RpcThreadPromise<Json>, String, String, LuaVariadic<Json>>("sendWorldMessage", bind(UniverseServerCallbacks::sendWorldMessage, universe, _1, _2, _3));
+  callbacks.registerCallbackWithSignature<RpcPromise<Json>, String, String, LuaVariadic<Json>>("sendWorldMessage", bind(UniverseServerCallbacks::sendWorldMessage, universe, _1, _2, _3));
   callbacks.registerCallbackWithSignature<bool, ConnectionId, String, Json>("sendPacket", bind(UniverseServerCallbacks::sendPacket, universe, _1, _2, _3));
   callbacks.registerCallbackWithSignature<String, ConnectionId>("clientWorld", bind(UniverseServerCallbacks::clientWorld, universe, _1));
   callbacks.registerCallbackWithSignature<void, ConnectionId, Maybe<String>>("disconnectClient", bind(UniverseServerCallbacks::disconnectClient, universe, _1, _2));
@@ -29,6 +30,30 @@ LuaCallbacks LuaBindings::makeUniverseServerCallbacks(UniverseServer* universe) 
   callbacks.registerCallback("warpClient", [universe](ConnectionId clientId, String action, Maybe<bool> deploy) {
     universe->clientWarpPlayer(clientId, parseWarpAction(action), deploy.value(false));
   });
+
+  callbacks.registerCallback("setServerAccount", [universe](String const& account, String const& password, Maybe<bool> admin) {
+    auto config = Root::singleton().configuration();
+    auto serverUsers = config->get("serverUsers").toObject();
+    serverUsers[account] = JsonObject{{"password", password}, {"admin", admin.value(false)}};
+    config->set("serverUsers", serverUsers);
+  });
+
+  callbacks.registerCallback("removeServerAccount", [universe](String const& account) {
+    auto config = Root::singleton().configuration();
+    auto serverUsers = config->get("serverUsers").toObject();
+    serverUsers.erase(account);
+    config->set("serverUsers", serverUsers);
+  });
+
+  callbacks.registerCallback("getServerAccounts", [universe]() -> Json {
+    auto config = Root::singleton().configuration();
+    auto serverUsers = config->get("serverUsers");
+    JsonObject result;
+    for (auto& p : serverUsers.iterateObject())
+      result[p.first] = JsonObject{{"admin", p.second.getBool("admin", false)}};
+    return result;
+  });
+
   
   callbacks.registerCallback("clientOpenProtocolVersion", [universe](ConnectionId clientId) {
     return universe->clientConnectionVersion(clientId);
@@ -67,6 +92,17 @@ LuaCallbacks LuaBindings::makeUniverseServerCallbacks(UniverseServer* universe) 
     auto worldTemplate = make_shared<WorldTemplate>(worldParameters, skyParameters, worldSeed);
     Json worldProperties = worldConfig.get("worldProperties", JsonObject{});
     universe->createCustomWorld(CustomWorldId(name), worldTemplate);
+  });
+  
+  callbacks.registerCallback("sendOwnUniverseMessage", [universe](String const& message, LuaVariadic<Json> args) -> RpcPromise<Json> {
+    return universe->sendUniverseMessage(ServerConnectionId,message,JsonArray::from(std::move(args)));
+  });
+  callbacks.registerCallback("sendUniverseMessage", [universe](ConnectionId const& connection, String const& message, LuaVariadic<Json> args) -> RpcPromise<Json> {
+    return universe->sendUniverseMessage(connection,message,JsonArray::from(std::move(args)));
+  });
+  
+  callbacks.registerCallback("connectionId", [universe]() {
+    return ServerConnectionId;
   });
 
   return callbacks;
@@ -125,6 +161,11 @@ void LuaBindings::UniverseServerCallbacks::adminBroadcast(UniverseServer* univer
   universe->adminBroadcast(arg1);
 }
 
+String LuaBindings::UniverseServerCallbacks::clientAccount(UniverseServer* universe, ConnectionId arg1) {
+  return universe->clientAccount(arg1);
+}
+
+
 // Sends a message to a specific client
 //
 // @param clientId the client id to whisper
@@ -142,6 +183,17 @@ void LuaBindings::UniverseServerCallbacks::adminWhisper(UniverseServer* universe
 // @return a boolean containing true if the client is an admin, false otherwise
 bool LuaBindings::UniverseServerCallbacks::isAdmin(UniverseServer* universe, ConnectionId arg1) {
   return universe->isAdmin(arg1);
+}
+
+// Set (or unset) the admin status of a specific user
+//
+// @param clientId the client id to modify
+// @param setAdminTo set admin status to this bool, defaults to true
+// @return nil
+void LuaBindings::UniverseServerCallbacks::setAdmin(UniverseServer* universe, ConnectionId arg1, Maybe<bool> arg2) {
+  ConnectionId client = arg1;
+  bool setAdminTo = arg2.value(true);
+  universe->setAdmin(client, setAdminTo);
 }
 
 // Returns whether or not a specific client is flagged as pvp
@@ -172,7 +224,7 @@ StringList LuaBindings::UniverseServerCallbacks::activeWorlds(UniverseServer* un
   return universe->activeWorlds().transformed(printWorldId);
 }
 
-RpcThreadPromise<Json> LuaBindings::UniverseServerCallbacks::sendWorldMessage(UniverseServer* universe, String const& worldId, String const& message, LuaVariadic<Json> args) {
+RpcPromise<Json> LuaBindings::UniverseServerCallbacks::sendWorldMessage(UniverseServer* universe, String const& worldId, String const& message, LuaVariadic<Json> args) {
   return universe->sendWorldMessage(parseWorldId(worldId), message, JsonArray::from(std::move(args)));
 }
 

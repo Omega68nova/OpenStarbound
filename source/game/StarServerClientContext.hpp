@@ -4,7 +4,7 @@
 #include "StarThread.hpp"
 #include "StarUuid.hpp"
 #include "StarJsonRpc.hpp"
-#include "StarRpcThreadPromise.hpp"
+#include "StarRpcPromise.hpp"
 #include "StarDamageTypes.hpp"
 #include "StarGameTypes.hpp"
 #include "StarHostAddress.hpp"
@@ -21,7 +21,7 @@ STAR_CLASS(ServerClientContext);
 class ServerClientContext {
 public:
   ServerClientContext(ConnectionId clientId, Maybe<HostAddress> remoteAddress, NetCompatibilityRules netRules, Uuid playerUuid,
-      String playerName, String shipSpecies, bool canBecomeAdmin, WorldChunks initialShipChunks);
+      String playerName, String shipSpecies, bool canBecomeAdmin, WorldChunks initialShipChunks, String account);
 
   ConnectionId clientId() const;
   Maybe<HostAddress> const& remoteAddress() const;
@@ -31,6 +31,7 @@ public:
   bool canBecomeAdmin() const;
   NetCompatibilityRules netRules() const;
   String descriptiveName() const;
+  String const& account() const;
 
   // Register additional rpc methods from other server side services.
   void registerRpcHandlers(JsonRpcHandlers const& rpcHandlers);
@@ -90,7 +91,7 @@ public:
   WarpToWorld playerReviveWarp() const;
   void setPlayerReviveWarp(WarpToWorld warp);
   
-  void customWorldRequested(String name, RpcThreadPromiseKeeper<WorldChunks> promise);
+  void customWorldRequested(String name, RpcPromiseKeeper<WorldChunks> promise);
   void customWorldReceived(String name, WorldChunks chunks);
   void failWorldRequests();
   
@@ -125,6 +126,7 @@ private:
   NetCompatibilityRules m_netRules;
   Uuid const m_playerUuid;
   String const m_playerName;
+  String const m_account;
   String m_shipSpecies;
   bool const m_canBecomeAdmin;
   
@@ -149,7 +151,7 @@ private:
   uint64_t m_netVersion = 0;
   int64_t m_creationTime;
   
-  StringMap<RpcThreadPromiseKeeper<WorldChunks>> m_worldRequests;
+  StringMap<RpcPromiseKeeper<WorldChunks>> m_worldRequests;
   StringMap<CustomWorld> m_customWorlds;
 
   NetElementData<Maybe<pair<WarpAction, WarpMode>>> m_orbitWarpActionNetState;
