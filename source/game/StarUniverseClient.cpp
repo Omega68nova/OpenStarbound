@@ -1092,7 +1092,9 @@ void UniverseClient::handlePackets(List<PacketPtr> const& packets) {
         if (method != LuaNil) {
           if (!packetJson)
             packetJson = packet->writeJson();
-          if ((skip = luaContext.luaTo<LuaFunction>(std::move(method)).invoke<LuaValue>(*packetJson).maybe<LuaBoolean>().value())) {
+          // Nil or non-boolean hook results mean "do not suppress packet".
+          // Calling value() without a fallback throws InvalidMaybeAccessException.
+          if ((skip = luaContext.luaTo<LuaFunction>(std::move(method)).invoke<LuaValue>(*packetJson).maybe<LuaBoolean>().value(false))) {
             break;
           }
         }

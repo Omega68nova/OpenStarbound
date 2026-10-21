@@ -71,10 +71,7 @@ SET (star_game_tests_SOURCES
       function_test.cpp
       item_test.cpp
       planetary_feature_test.cpp
-<<<<<<< HEAD
-=======
       composite_world_test.cpp
->>>>>>> af0edc9b80b7c36dbfeff607b37b529f65710602
       root_test.cpp
       server_test.cpp
       spawn_test.cpp
