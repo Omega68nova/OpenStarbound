@@ -929,6 +929,15 @@ bool UniverseClient::compositeRenderingActive() const {
   return !m_compositeWorldPlacements.empty();
 }
 
+Vec2I UniverseClient::compositeWorldOffset(WorldId const& worldId) const {
+  RecursiveMutexLocker locker(m_mutex);
+  if (worldId) {
+    if (auto placement = m_compositeWorldPlacements.ptr(printWorldId(worldId)))
+      return placement->offset;
+  }
+  return {};
+}
+
 void UniverseClient::forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action) {
   RecursiveMutexLocker locker(m_mutex);
   if (!m_clientContext)
