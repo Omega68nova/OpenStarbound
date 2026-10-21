@@ -889,9 +889,10 @@ ClientSubWorldId UniverseClient::getSubWorldOnWorld(WorldId worldId) {
 }
 
 void UniverseClient::destroySubWorldOnWorld(WorldId worldId) {
-  if (!m_subWorlds.hasRightValue(worldId)) {
+  // A detached world must not keep a stale virtual placement or a keepalive.
+  clearCompositeWorldPlacement(worldId);
+  if (!m_subWorlds.hasRightValue(worldId))
     return;
-  }
   setSubWorldWorld(m_subWorlds.getLeft(worldId), WorldId());
 }
 
@@ -906,9 +907,25 @@ void UniverseClient::setCompositeWorldPlacement(WorldId const& worldId, Vec2I co
 }
 
 void UniverseClient::clearCompositeWorldPlacement(WorldId const& worldId) {
-  RecursiveMutexLocker locker(m_mutex);
-  if (worldId)
+  WorldClientThreadPtr thread;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    if (!worldId)
+      return;
     m_compositeWorldPlacements.remove(printWorldId(worldId));
+    if (m_subWorlds.hasRightValue(worldId)) {
+      auto id = m_subWorlds.getLeft(worldId);
+      if (m_subWorldThreads.contains(id))
+        thread = m_subWorldThreads.get(id);
+    }
+  }
+
+  // Stop keeping a headless world alive when its placement is unregistered.
+  // Never hold the universe mutex across the world thread's update mutex.
+  if (thread)
+    thread->executeAction([](WorldClientThread*, WorldClient* world) {
+      world->disableCompositeRendering();
+    });
 }
 
 JsonArray UniverseClient::compositeWorldPlacements() const {
