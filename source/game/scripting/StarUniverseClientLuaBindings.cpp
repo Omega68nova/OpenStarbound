@@ -138,6 +138,10 @@ LuaCallbacks LuaBindings::makeUniverseClientCallbacks(UniverseClient* universe) 
     return universe->compositeWorldSize(parseWorldId(worldId));
   });
 
+  callbacks.registerCallback("compositeRegionAtHeight", [universe](int virtualY) -> Maybe<String> {
+    return universe->compositeRegionAtHeight(virtualY);
+  });
+
   callbacks.registerCallback("sendSubWorldMessage", [universe](String const& worldId, String const& message, LuaVariadic<Json> args) -> RpcPromise<Json> {
     return universe->sendSubWorldOnWorldMessage(parseWorldId(worldId), message, JsonArray::from(std::move(args)));
   });
