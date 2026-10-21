@@ -163,6 +163,10 @@ public:
   void centerClientWindowOnPlayer(Vec2U const& windowSize);
   void centerClientWindowOnPlayer();
   RectI clientWindow() const;
+  // Enables visual rendering for an otherwise headless secondary world.
+  // Does not give it a main player or alter server-side world ownership.
+  void setCompositeRenderWindow(RectI window);
+  void disableCompositeRendering();
   WorldClientState& clientState();
 
   Maybe<ChainableJsonMessageResponse> receiveMessage(ConnectionId fromConnection, String const& message, JsonArray const& args);
@@ -337,6 +341,7 @@ private:
   bool m_inWorld;
   
   bool m_headless;
+  bool m_compositeRenderEnabled = false;
   
   ClientSubWorldId m_subWorldId;
   bool m_requestedDestroy;
