@@ -939,24 +939,33 @@ Vec2I UniverseClient::compositeWorldOffset(WorldId const& worldId) const {
 }
 
 void UniverseClient::forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action) {
-  RecursiveMutexLocker locker(m_mutex);
-  if (!m_clientContext)
-    return;
+  // Snapshot the references before locking any secondary WorldClient. Its
+  // update/scripts may themselves call back into the universe client; holding
+  // the universe mutex while entering the world lock would invert lock order.
+  List<pair<CompositeWorldPlacement, WorldClientThreadPtr>> worlds;
+  {
+    RecursiveMutexLocker locker(m_mutex);
+    if (!m_clientContext)
+      return;
 
-  WorldId primaryWorld = playerWorld();
-  for (auto const& p : m_compositeWorldPlacements) {
-    auto const& placement = p.second;
-    if (placement.worldId == primaryWorld || !m_subWorlds.hasRightValue(placement.worldId))
-      continue;
-    auto subWorldId = m_subWorlds.getLeft(placement.worldId);
-    if (!m_subWorldThreads.contains(subWorldId))
-      continue;
-    auto thread = m_subWorldThreads.get(subWorldId);
-    if (thread->errorOccurred())
-      continue;
-    thread->executeAction([&](WorldClientThread*, WorldClient* subWorld) {
+    WorldId primaryWorld = playerWorld();
+    for (auto const& p : m_compositeWorldPlacements) {
+      auto const& placement = p.second;
+      if (placement.worldId == primaryWorld || !m_subWorlds.hasRightValue(placement.worldId))
+        continue;
+      auto subWorldId = m_subWorlds.getLeft(placement.worldId);
+      if (m_subWorldThreads.contains(subWorldId)) {
+        auto thread = m_subWorldThreads.get(subWorldId);
+        if (!thread->errorOccurred())
+          worlds.append({placement, thread});
+      }
+    }
+  }
+
+  for (auto const& entry : worlds) {
+    entry.second->executeAction([&](WorldClientThread*, WorldClient* subWorld) {
       if (subWorld->inWorld())
-        action(placement, subWorld);
+        action(entry.first, subWorld);
     });
   }
 }
