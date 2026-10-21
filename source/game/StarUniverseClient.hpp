@@ -140,6 +140,8 @@ public:
   Vec2I compositeWorldOffset(WorldId const& worldId) const;
   // Empty until the requested world has actually finished opening.
   Maybe<Vec2U> compositeWorldSize(WorldId const& worldId);
+  // Returns empty if no world or multiple overlapping worlds occupy this Y.
+  Maybe<String> compositeRegionAtHeight(int virtualY);
   // Access matching subworlds under their update-thread locks for rendering.
   void forEachCompositeSubWorld(function<void(CompositeWorldPlacement const&, WorldClient*)> const& action);
 
