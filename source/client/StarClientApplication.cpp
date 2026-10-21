@@ -695,6 +695,8 @@ void ClientApplication::changeState(MainAppState newState) {
   }
 
   if (oldState > MainAppState::Title && m_state <= MainAppState::Title) {
+    // Per-world terrain/sky caches must not survive a server or player switch.
+    m_compositeWorldPainters.clear();
     if (m_universeClient)
       m_universeClient->disconnect();
 
