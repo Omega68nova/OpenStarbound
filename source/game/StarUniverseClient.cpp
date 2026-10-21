@@ -1093,7 +1093,7 @@ void UniverseClient::handlePackets(List<PacketPtr> const& packets) {
           if (!packetJson)
             packetJson = packet->writeJson();
           // Nil or non-boolean hook results mean "do not suppress packet".
-          // Calling value() without a fallback throws InvalidMaybeAccessException.
+          // An unguarded Maybe::value() disconnects the client on arbitrary packets.
           if ((skip = luaContext.luaTo<LuaFunction>(std::move(method)).invoke<LuaValue>(*packetJson).maybe<LuaBoolean>().value(false))) {
             break;
           }
