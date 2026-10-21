@@ -16,6 +16,8 @@ public:
   float pixelRatio() const;
 
   void setWorldGeometry(WorldGeometry geometry);
+  // Composite views may extend beyond either source world height.
+  void setVerticalClamping(bool enabled);
   WorldGeometry worldGeometry() const;
 
   // Set the camera center position (in world space) to as close to the given
@@ -47,6 +49,7 @@ public:
 
 private:
   WorldGeometry m_worldGeometry;
+  bool m_clampVertical = true;
   Vec2U m_screenSize;
   float m_pixelRatio = 1.0f;
   float m_targetPixelRatio = 1.0f;
@@ -76,6 +79,11 @@ inline float WorldCamera::pixelRatio() const {
 
 inline void WorldCamera::setWorldGeometry(WorldGeometry geometry) {
   m_worldGeometry = std::move(geometry);
+}
+
+inline void WorldCamera::setVerticalClamping(bool enabled) {
+  m_clampVertical = enabled;
+  setCenterWorldPosition(m_rawWorldCenter, true);
 }
 
 inline WorldGeometry WorldCamera::worldGeometry() const {
