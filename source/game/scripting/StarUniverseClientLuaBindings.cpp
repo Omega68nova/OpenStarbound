@@ -115,6 +115,20 @@ LuaCallbacks LuaBindings::makeUniverseClientCallbacks(UniverseClient* universe) 
     universe->destroySubWorldOnWorld(parseWorldId(worldId));
   });
   
+  // Client-only, declarative virtual-world layout API. Mods manage which
+  // subworlds are loaded; the compositor will consume these placements.
+  callbacks.registerCallback("setCompositeWorldPlacement", [universe](String const& worldId, Vec2I offset) {
+    universe->setCompositeWorldPlacement(parseWorldId(worldId), offset);
+  });
+
+  callbacks.registerCallback("clearCompositeWorldPlacement", [universe](String const& worldId) {
+    universe->clearCompositeWorldPlacement(parseWorldId(worldId));
+  });
+
+  callbacks.registerCallback("compositeWorldPlacements", [universe]() -> JsonArray {
+    return universe->compositeWorldPlacements();
+  });
+
   callbacks.registerCallback("sendSubWorldMessage", [universe](String const& worldId, String const& message, LuaVariadic<Json> args) -> RpcPromise<Json> {
     return universe->sendSubWorldOnWorldMessage(parseWorldId(worldId), message, JsonArray::from(std::move(args)));
   });
