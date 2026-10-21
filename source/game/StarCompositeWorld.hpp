@@ -2,6 +2,7 @@
 
 #include "StarWarping.hpp"
 #include "StarVector.hpp"
+#include <cstdint>
 
 namespace Star {
 
@@ -18,6 +19,14 @@ struct CompositeWorldPlacement {
 
   Vec2I toLocal(Vec2I const& virtualPosition) const {
     return virtualPosition - offset;
+  }
+
+  // Vertical worlds retain their full native Y range, including their
+  // existing atmosphere/space biomes. Bounds are inclusive at the bottom
+  // and exclusive at the top, matching regular world tile coordinates.
+  bool containsVirtualY(int virtualY, unsigned worldHeight) const {
+    int64_t localY = (int64_t)virtualY - (int64_t)offset.y();
+    return localY >= 0 && localY < (int64_t)worldHeight;
   }
 };
 
